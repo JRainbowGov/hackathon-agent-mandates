@@ -1,0 +1,28 @@
+{
+  "template": "git@github.com:i-dot-ai/i-dot-ai-cookiecutter.git",
+  "commit": "911913211676fc2bc30f6d743d21564762d983f3",
+  "checkout": null,
+  "context": {
+    "cookiecutter": {
+      "project_name": "agent-mandate-hack",
+      "app_name": "agent-mandate-hack",
+      "_copy_without_render": [
+        "*.html",
+        "*.js",
+        "*.css",
+        "*.ico",
+        "*.ttf"
+      ],
+      "frontend_framework": "svelte",
+      "__frontend_type": "node",
+      "backend_framework": "fastapi",
+      "database_backend": "With user groups",
+      "_integration_test": "false",
+      "__perms_boundary_app_name": "agent-mandate-hack",
+      "owner": "Damian Bemben",
+      "email_address": "damian.bemben@dsit.gov.uk",
+      "_template": "git@github.com:i-dot-ai/i-dot-ai-cookiecutter.git"
+    }
+  },
+  "directory": "templates/webapp-ecs"
+}

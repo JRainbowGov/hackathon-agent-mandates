@@ -1,0 +1,24 @@
+---
+import Layout from "@layouts/Layout.astro";
+import { Link } from "@i-dot-ai-npm/component-library-svelte";
+---
+
+<Layout>
+  <div class="govuk-width-container govuk-main-wrapper">
+    <div class="govuk-grid-row">
+      <div class="govuk-grid-column-two-thirds">
+        <h1 class="govuk-heading-xl">Mandate gateway hackathon</h1>
+        <p class="govuk-body">
+          <Link href="/demo">Mandate gateway walkthrough</Link>: issue a mandate, revoke it, send signed
+          tool calls through the gateway.
+        </p>
+        <p class="govuk-body">
+          This project has been set up with the i.AI Design Kit installed. Visit
+          the <Link href="https://design-kit.ai.gov.uk/"
+            >i.AI Design Kit
+          </Link> for more information on how to use the design kit in your project.
+        </p>
+      </div>
+    </div>
+  </div>
+</Layout>

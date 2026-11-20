@@ -1,0 +1,59 @@
+seed: 20261011
+cohorts: ["2021/22", "2022/23", "2023/24"]   # academic years in which each cohort is in nc_year
+nc_year: 11
+n_per_cohort: 500
+local_authority: "SYN"                       # single synthetic area code for HomeArea / SchoolArea
+classification:                              # 4-level PII hierarchy, lowest -> highest; written to the manifest
+  levels:
+    1: "Public Information"
+    2: "Basic / Non-Sensitive PII"
+    3: "Sensitive PII"
+    4: "Highly Sensitive PII / Special Category Data"
+  tables:                                    # one level per output table (every table must be listed)
+    schools: 1                               # school names and URNs are public
+    display_names: 2                         # full names
+    personal_data_deprivation: 2             # area-level home / school location
+    personal_data_school_census: 4           # Ethnicity and in-care flag are special category data
+  columns:                                   # per-column overrides; an unlisted column takes its table's level
+    personal_data_school_census:
+      URN: 1
+      AcademicYear: 1
+      CensusTerm: 1
+      Psuedo ID: 2
+      Gender: 2
+      AgeAtStartOfAcademicYear: 2
+      EnrolStatus: 2
+      Language: 3
+      FSMeligible: 3
+      Ethnicity: 4
+      InCareAtCurrentSchool: 4
+schools:
+  n: 12
+  effect_sd: 0.3                             # school random effect on the latent disadvantage factor
+census:
+  missing_spring_share: 0.03                 # pupils with no spring row (off roll)
+  subsidiary_share: 0.02                     # spring rows with EnrolStatus S
+base_rates:
+  fsm: 0.25                                  
+  ever_fsm6_extra: 0.08                     
+  ehcp: 0.04                                
+  sen_support: 0.12                         
+  eal: 0.18                                  
+  in_care: 0.01                              
+  female: 0.49
+ethnic_group_major:                          
+  WHIT: 0.72
+  ASIA: 0.11
+  BLAC: 0.06
+  MIXD: 0.06
+  CHIN: 0.01
+  AOEG: 0.02
+  UNCL: 0.02
+latent:                                      
+  fsm: 1.0
+  fsm_idaci_bonus: 1.0                       # extra logit for FSM when IDACI is top quintile
+  ever_fsm6: 1.0
+  sen_support: 0.5
+  ehcp: 0.5
+  in_care: 0.8
+  idaci: 0.8

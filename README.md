@@ -1,0 +1,249 @@
+# Mandate Gateway Hackathon
+
+The local school administrator has full access to all local schools' pupil data: census records, names,
+care status, everything. They are not technical, and are stretched thin for capacity. They have started handing jobs to AI agents: find a pupil's
+record, draft the absence letters, count the pupils in care.
+
+Today the only access they can give an agent is their own, which is all of it. What they want is to pass down just
+the part each job needs, for as long as the job lasts, and to be able to take it back. They will ask for this in
+plain words, every request will sound reasonable, and the requests get harder as the hackathon goes on.
+
+**The open question for these two days: how should a person pass part of their access down to an agent?**
+
+## The Problem
+
+Agents increasingly use the same servers people do, and they usually get in the same way: with a bearer token:
+
+- It says who, not what for, how far or until when.
+- Any leak (a log line, a prompt, a tool argument) hands over everything it allows.
+- It cannot be passed to a helper agent without passing on all of it.
+
+## An (Initial) Solution
+
+- A [**mandate**](https://agentmandate.net/) is a signed grant from a person to one agent. It is
+  limited to certain tools and data, it expires, and it can be revoked.
+- A **gateway** sits in front of the data and checks the mandate on every call the agent makes.
+
+Both are small and deliberately breakable/changeable. Beyond that the design is yours to address within your teams: change the mandate, change the gateway, or bring a problem
+of your own. 
+
+What we want at the end is what you found out: where agent mandates hold and where they don't.
+
+## The path
+
+1. **Get it running.** Follow [Start here](#start-here) below. (~30min for set-up & discussion)
+2. **Build: questions 0 to 5** (Day 1 morning). Each [question](questions/README.md) starts with something the administrator asks 
+   their agent to do. The starter gateway already handles questions 0 to 2 and gets 3 to 5 wrong. Done when
+   `make eval_run` shows questions 0 to 5 passing. These smaller questions are a chance for you to get acquainted with your teams! (~2h)
+3. **Explore: questions 6 to 16** (Day 1 afternoon). These are open problems with no specific right answer. Take on one or more, or a problem of your own. (~3h)
+   Partway through there is a check-in ([AGENDA.md](AGENDA.md)): each team shows a mandate, a request it allows and
+   a request it denies for the question it took, laid out like the [worked example](questions/02-worked-example.md).
+4. **Deploy and harden** (Day 2 morning). Put your gateway on a URL and post it, with the default attack mandate and a
+   feature mandate from your Day 1 question ([ATTACK_SCORING.md](day_2_attack/ATTACK_SCORING.md)). Add any final protection (~2h)
+5. **Attack** (Day 2 afternoon). Try to get data out of other teams' gateways that their mandates do not cover.
+   An attack *lands* when a request goes through the gateway and returns data outside the mandate. 
+6. **Show and tell** (Day 2, 16:00). One attack that landed on you, one you landed, one thing this design gets
+   right and one it gets wrong.
+
+## Start here
+
+1. Install Docker (with compose), [uv](https://docs.astral.sh/uv/) (`brew install uv`), Node/npm and `make`.
+2. Run it:
+
+   ```bash
+   make hack        # keys, a one-school mandate, the eval pack, all containers, and an example signed call
+   make eval_run    # every question's cases against your gateway, PASS/FAIL, then a tally per question
+   make install     # Installs & rebuilds all containers
+   make run         # Runs containers independently.
+   ```
+
+3. Open **[questions/README.md](questions/README.md)**. It lists the questions, 0 to 16. Each starts with something the administrator asks.
+4. Read [gateway/lib/gateway_verify.py](gateway/lib/gateway_verify.py). It walks through the current verification process.
+
+Ports: MCP server `:8080`, gateway `:8082`, demo UI `localhost:8081/demo` (a walkthrough of issuing a mandate and making a call - feel free to extend, e.g - for human in the loop escalation.).
+`make test` and `make lint` run the tests and ruff. The data sources are listed in
+[mcp_server/data/synthetic/synthetic_manifest.json](mcp_server/data/synthetic/synthetic_manifest.json).
+
+## Current flow architecture
+
+| Key | Who holds it | What it does |
+| --- | --- | --- |
+| **Issuer key** (`gateway/state/issuer_key.pem`) | The person granting access. Locally, `make hack` makes one, so each team is its own issuer | Signs mandates. The gateway only trusts mandates from issuers in `trusted_list.json` |
+| **Team key** (`gateway/state/agent.pem`) | The caller (a team, a person or an agent). Make a new one any time with `cli keygen` | Signs each request. It only works with a mandate issued for it |
+
+The issuer signs a grant for one team key that limits it to certain tools, a school
+and a time window. Unlike a bearer token, a stolen mandate is useless without the team key, and the team key can
+do nothing without a mandate. For the attack phase, you issue a mandate with *your* issuer key for *another team's*
+public team key, and it only works against your gateway.
+
+```mermaid
+sequenceDiagram
+    participant C as Caller (human or agent)
+    participant I as Issuer
+    participant G as Gateway :8082
+    participant M as MCP server :8080
+    C->>I: team key (public half)
+    I-->>C: mandate.jwt limiting that key: tools, school, expiry
+    C->>G: POST /tools/call: tool, arguments, mandate, signature
+    G->>G: check mandate, signature and scope
+    alt 
+        rect rgba(26, 127, 55, 0.2)
+        G->>M: tools/call
+        M-->>G: result
+        G-->>C: 200 {decision, result}
+        end
+    else 
+        rect rgba(207, 34, 46, 0.2)
+        G-->>C: 403 {decision}
+        end
+    end
+```
+
+Where each step lives in the code:
+
+| Step | Code |
+| --- | --- |
+| Team key | `gateway/state/agent.pem`, made by `cli keygen` / `load_or_create_key` in [gateway/cli.py](gateway/cli.py) |
+| Issuer signs the mandate | `cli issue` → `issue_mandate` in [gateway/cli.py](gateway/cli.py), `MandateIssuer` in [gateway/lib/mandate_issuer.py](gateway/lib/mandate_issuer.py). Issuer key: `gateway/state/issuer_key.pem` |
+| Caller signs the request | `sign_request` in [gateway/cli.py](gateway/cli.py) |
+| Gateway endpoint | `tools_call` in [gateway/main.py](gateway/main.py) |
+| Mandate, signature and scope checks | [gateway/lib/gateway_verify.py](gateway/lib/gateway_verify.py), trusted issuers [gateway/lib/trust_registry.py](gateway/lib/trust_registry.py), revocation [gateway/lib/status_list.py](gateway/lib/status_list.py) |
+| MCP server | [mcp_server/api/routes_mcp.py](mcp_server/api/routes_mcp.py) |
+
+
+
+## The MCP server's tools
+
+The gateway sees each tool as `pupil-data.<tool>`. 
+
+| Tool | Returns | Useful for |
+| --- | --- | --- |
+| `search(query, urn, limit)` | Census rows matching a substring | Questions 0 to 5 |
+| `get(path, limit)` | One data file, parsed | Question 4 |
+| `aggregate(table, group_by, measure, where)` | Counts per group, unsuppressed | Question 8 |
+| `classification()` | PII level of every table and column | Questions 6 and 15 |
+| `roster(urn, year_group, academic_year, term)` | Pseudo IDs and names of a Year 10 or 11 at one school | Questions 7 and 11 |
+| `pupil(pupil_id, urn)` | One pupil's full record: census (ethnicity, care status), name, deprivation | Questions 6, 11, 12 and 15 |
+| `draft(urn, pupil_ids, kind)` | A letter home per pupil, by name. Matches `*.draft`, so `STEP_UP` | Questions 7, 10 and 12 |
+| `write(pupil_id, urn, column, value, reason)` | Corrects one census field, appended to `mcp_server/data/writes/corrections.jsonl`. Matches `*.write`, so `STEP_UP` | Questions 9 and 14 |
+
+## What the gateway checks
+
+`make eval_run` sends the cases in [gateway/eval.py](gateway/eval.py) using this mandate:
+
+| Field | Value | Meaning |
+| --- | --- | --- |
+| `scope` | `search` with `urn` ∈ [`SCH01`] | Search pupils of one school only |
+| `scope` | `get` with `path` ∈ [`synthetic/synthetic_schools.csv`, `synthetic/synthetic_manifest.json`] | Read only the two files with no pupil data, by exact path |
+| `deny` | `*.write`, `pii.*` | Refused before scope is checked |
+| `exp` | 3 days from issue (`--ttl`) | The `expired` case uses a copy that expired 2 minutes ago |
+| `cnf.jwk` | public key of `eval_pack/agent.pem` | Only that key can sign requests |
+| `principal` / `org` / `purpose` | `eval:runner` / `org:hackathon` / `eval set` | Who it was issued to and why |
+
+Question 5 also uses `eval_pack/two_schools.jwt`, the same mandate with `search` scoped to `SCH01` and `SCH02` as
+two separate entries.
+
+The starter gateway checks a request in this order
+([gateway/lib/gateway_verify.py](gateway/lib/gateway_verify.py)):
+
+1. The mandate: is it a mandate, is the issuer trusted, is the signature valid, is it in date, is it revoked?
+2. The request: is it signed by the mandate's key, is it fresh (within 5 minutes), has the nonce been seen before?
+3. The scope: is the tool on a deny rule, is it in scope, and does every constrained argument have an allowed
+   value?
+
+Each answer is `200 ALLOW`, `202 STEP_UP` (held for approval, not forwarded) or `403 DENY`, with a `reason_code`:
+
+| `reason_code` | Meaning |
+| --- | --- |
+| `IN_SCOPE` | Allowed |
+| `SENSITIVE_TOOL` | Step-up: the tool matches `*.write` or `*.draft` |
+| `SIG_INVALID` | The mandate's issuer signature does not match its payload, e.g. after editing it |
+| `EXPIRED` / `REVOKED` | Out of date, or its index is set in the status list |
+| `WRONG_TOKEN_TYPE` / `ISSUER_NOT_ACCREDITED` / `NOT_YET_VALID` / `STATUS_UNAVAILABLE` | Not a mandate, an issuer not in `trusted_list.json`, `nbf` in the future, or the status list cannot be read |
+| `POP_FAILED` | The request was not signed by the mandate's key, or its nonce has been seen before |
+| `DENIED_BY_RULE` | The tool matches a `deny` glob. Checked before scope |
+| `OUT_OF_SCOPE` | No scope entry lists the tool |
+| `CONSTRAINT_MISSING` / `CONSTRAINT_VIOLATED` | A constrained argument is absent, or its value is not in the allowed list |
+
+
+### Changing a mandate
+
+A mandate can't be edited: changing the payload breaks the issuer signature.
+To change one, issue a new mandate for the same key and revoke the old one. For example, to move the team key from `SCH01` to `SCH02`, with
+`search` only, for 1 hour:
+
+```bash
+# 1. Issue the new mandate. Note the status idx it prints, which you need to revoke this mandate later
+uv run python -m gateway.cli issue --agent-key gateway/state/agent.pem --ttl 3600 -o gateway/state/sch02.jwt \
+  --scope '[{"server": "pupil-data", "tools": ["search"], "constraints": {"urn": ["SCH02"]}}]' \
+  --purpose "Pupil-data lookups for school SCH02" --org school:SCH02
+# wrote mandate (status idx 3) to gateway/state/sch02.jwt
+
+# 2. Use it: same key, new mandate
+uv run python -m gateway.cli call --mandate gateway/state/sch02.jwt --agent-key gateway/state/agent.pem \
+  --tool search --args '{"query": "P0004", "urn": "SCH02", "limit": 1}'   # 200 ALLOW
+
+# 3. Revoke the old one. Its idx was printed when it was issued, or read it from the mandate (status.status_list.idx):
+uv run python -m gateway.cli decode gateway/state/mandate.jwt
+uv run python -m gateway.cli revoke --idx <that idx>
+uv run python -m gateway.cli call --mandate gateway/state/mandate.jwt --agent-key gateway/state/agent.pem \
+  --tool search --args '{"query": "P0004", "urn": "SCH01", "limit": 1}'   # 403 REVOKED
+```
+
+The gateway reads the status list on every request, so a revocation applies without a restart. The same steps from Python are in
+[examples/sending_requests.ipynb](examples/sending_requests.ipynb).
+
+To make a mandate say something new, such as a clearance or a limit, see [docs/new_mandate.md](docs/new_mandate.md):
+`cli issue --claims` signs a claim of your own into the mandate, and the page shows where the gateway reads it.
+
+## Sending requests
+
+Locally, `make hack` creates a key (`gateway/state/agent.pem`) and a starting mandate for it
+(`gateway/state/mandate.jwt`): `search` at school `SCH01`, and `get` on the schools file and the manifest, 2 hours. On `EXPIRED`, run
+`make gateway_issue`.
+
+To limit the key further, issue a narrower mandate, e.g. `search` only for 10 minutes:
+
+```bash
+uv run python -m gateway.cli issue --agent-key gateway/state/agent.pem --ttl 600 -o narrow.jwt \
+  --scope '[{"server": "pupil-data", "tools": ["search"], "constraints": {"urn": ["SCH01"]}}]'
+```
+
+### Across laptops
+
+Each laptop that runs `make hack` is its own issuer. To use a teammate's gateway, send them a public key and get a
+mandate back. Never copy `issuer_key.pem`.
+
+```bash
+uv run python -m gateway.cli keygen -o key.pem > public_key.jwk               # you: send public_key.jwk
+uv run python -m gateway.cli issue --agent-key public_key.jwk -o mandate.jwt  # them: send mandate.jwt back
+```
+
+Then call as below with `--mandate mandate.jwt --agent-key key.pem --url <their gateway>`.
+
+### As a human
+
+```bash
+uv run python -m gateway.cli call --mandate gateway/state/mandate.jwt --agent-key gateway/state/agent.pem \
+  --tool search --args '{"query": "P0004", "urn": "SCH01", "limit": 1}'
+```
+
+Response:
+
+```text
+{
+  "decision": {"decision": "ALLOW", "reason_code": "IN_SCOPE", "agent_id": "ZXF9...", "detail": ""},
+  "result": [{"Psuedo ID": "P0004", "AcademicYear": "2020/21", "URN": "SCH01"}]
+}
+```
+
+### As an agent
+
+[examples/sending_requests.ipynb](examples/sending_requests.ipynb) walks through it from code: an allowed call, a denied
+one, then a narrower mandate issued, used and revoked. Open it in VS Code, or run
+`uv run --with jupyter jupyter lab examples/sending_requests.ipynb`. The same `call` as a plain script is
+[examples/agent_request_example.py](examples/agent_request_example.py).
+
+For a model-driven agent, give the model `call` as its tool. The agent loop is yours to write.
+
+`GET localhost:8082/describe` lists the tools and the signing rules, with a worked example.

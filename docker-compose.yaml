@@ -1,0 +1,72 @@
+services:
+
+  backend:
+    build:
+      context: .
+      dockerfile: ./mcp_server/Dockerfile
+    volumes:
+      - ./mcp_server/data:/app/mcp_server/data
+    container_name: mcp-backend
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    healthcheck:
+      test: [ "CMD", "curl", "--fail", "http://localhost:8080/api/healthcheck" ]
+      interval: 3s
+      timeout: 2s
+      retries: 3
+      start_period: 3s
+    networks:
+      - agent-mandate-hack-network
+
+  frontend:
+    build:
+      context: .
+      dockerfile: ./frontend/Dockerfile
+    container_name: svelte
+    ports:
+      - "8081:8081"
+    env_file:
+      - .env
+    networks:
+      - agent-mandate-hack-network
+
+    depends_on:
+      backend:
+        condition: service_healthy
+      gateway:
+        condition: service_healthy
+    environment:
+      - BACKEND_URL=http://backend:8080
+      - GATEWAY_URL=http://gateway:8082
+
+  gateway:
+    build:
+      context: .
+      dockerfile: ./gateway/Dockerfile
+    container_name: gateway
+    ports:
+      - "8082:8082"
+    volumes:
+      - ./gateway/state:/app/gateway/state
+    environment:
+      - MCP_SERVERS=pupil-data=http://backend:8080/mcp/
+      - GATEWAY_STATE_DIR=/app/gateway/state
+      - LITELLM_KEY=${LITELLM_KEY:-}
+      - LITELLM_BASE_URL=${LITELLM_BASE_URL:-}
+    healthcheck:
+      test: [ "CMD", "curl", "--fail", "http://localhost:8082/healthcheck" ]
+      interval: 3s
+      timeout: 2s
+      retries: 3
+      start_period: 3s
+    networks:
+      - agent-mandate-hack-network
+    depends_on:
+      backend:
+        condition: service_healthy
+
+networks:
+  agent-mandate-hack-network:
+    driver: bridge

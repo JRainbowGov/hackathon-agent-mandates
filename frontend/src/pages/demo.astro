@@ -1,0 +1,21 @@
+---
+import Layout from "@layouts/Layout.astro";
+import MandateDemo from "@components/MandateDemo.svelte";
+---
+
+<Layout>
+  <div class="govuk-width-container govuk-main-wrapper">
+    <div class="govuk-grid-row">
+      <div class="govuk-grid-column-two-thirds">
+        <h1 class="govuk-heading-xl">Mandate gateway walkthrough</h1>
+        <p class="govuk-body">
+          A visual walkthrough of the mandate gateway: the issuer key, a signed mandate, trust, revocation and signed tool calls.
+          <br>
+          <br>
+          Step 0 shows the issuer key that signs mandates. Step 1 issues a signed mandate. In the hack, you'll be given a specific mandate to test against the eval set.
+        </p>
+        <MandateDemo client:load />
+      </div>
+    </div>
+  </div>
+</Layout>

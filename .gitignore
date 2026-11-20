@@ -1,0 +1,73 @@
+venv
+.DS_Store
+.idea
+.gcloudignore
+.git
+.venv
+__pycache__/
+/setup.cfg
+.ipynb_checkpoints
+.env
+Brewfile.lock.json
+*.pdf
+
+# Terraform
+**/.terraform/*
+**/terraform/terraform.tfstate.d
+**/.terraform*
+# Terraform lock files
+*/.terraform.lock.hcl
+.terraform.lock.hcl
+*.terraform.lock.hcl 
+
+# Data
+*.csv
+*.xlsx
+*.xls
+*.pkl
+*.parquet
+*.zip
+*.ods
+
+# outputs
+*.pdf
+*.jpg
+*.png
+*.pptx
+*.ppt
+*.docx
+
+# Rendered presentations
+*.html
+*_files/
+
+# Docker cache
+.build-cache
+
+# Python package manager lock files
+poetry.lock
+
+# Frontend dependencies (applies to all frontend frameworks)
+frontend/node_modules/
+frontend/.env*.local
+
+
+
+frontend/.astro/
+frontend/dist/
+
+# Gateway runtime state (private keys, audit log)
+gateway/state/*
+!gateway/state/.gitkeep
+
+.pytest_cache/
+.ruff_cache/
+eval_pack/
+
+# Synthetic extract: commit the CSVs (overrides the global *.csv rule above)
+!mcp_server/data/synthetic/*.csv
+
+.tmp/
+
+# MCP server write tool output
+mcp_server/data/writes/

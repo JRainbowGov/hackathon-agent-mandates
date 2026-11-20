@@ -1,0 +1,162 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:hack:mandate:v1",
+  "title": "Agentic mandate (JWT claims set)",
+  "description": "Claims carried in an EdDSA-signed JWT (typ: mandate+jwt). Documentation only: the gateway reads the `required` claims and ignores the rest.",
+  "type": "object",
+  "required": [
+    "iss",
+    "jti",
+    "exp",
+    "cnf",
+    "agent_id",
+    "scope",
+    "deny",
+    "status"
+  ],
+  "properties": {
+    "iss": {
+      "type": "string",
+      "format": "uri",
+      "description": "Issuer URL. Must resolve in the trust registry."
+    },
+    "jti": {
+      "type": "string",
+      "description": "Unique mandate id (urn:uuid:...)."
+    },
+    "iat": {
+      "type": "integer"
+    },
+    "nbf": {
+      "type": "integer"
+    },
+    "exp": {
+      "type": "integer"
+    },
+    "vct": {
+      "const": "urn:hack:mandate:v1",
+      "description": "Credential type, SD-JWT VC style."
+    },
+    "delegator": {
+      "type": "object",
+      "required": [
+        "principal",
+        "org"
+      ],
+      "properties": {
+        "principal": {
+          "type": "string",
+          "description": "e.g. officer:jsmith"
+        },
+        "org": {
+          "type": "string",
+          "description": "e.g. dept:dfe"
+        },
+        "authority": {
+          "type": "string",
+          "description": "Statutory basis / policy reference"
+        }
+      }
+    },
+    "cnf": {
+      "type": "object",
+      "description": "Proof-of-possession key of the delegate (RFC 7800). The agent signs each request with this key.",
+      "required": [
+        "jwk"
+      ],
+      "properties": {
+        "jwk": {
+          "type": "object",
+          "required": [
+            "kty",
+            "crv",
+            "x"
+          ],
+          "properties": {
+            "kty": {
+              "const": "OKP"
+            },
+            "crv": {
+              "const": "Ed25519"
+            },
+            "x": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "agent_id": {
+      "type": "string",
+      "description": "RFC 7638 thumbprint of cnf.jwk, or any stable id"
+    },
+    "purpose": {
+      "type": "string",
+      "maxLength": 500
+    },
+    "scope": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "server",
+          "tools"
+        ],
+        "properties": {
+          "server": {
+            "type": "string",
+            "description": "MCP server name as exposed by the gateway"
+          },
+          "tools": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Allowed tool names; '*' not permitted"
+          },
+          "constraints": {
+            "type": "object",
+            "description": "Argument constraints: each key must appear in tool arguments with a value in the given list",
+            "additionalProperties": {
+              "type": "array",
+              "items": {}
+            }
+          }
+        }
+      }
+    },
+    "deny": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Glob patterns over 'server.tool'; deny always wins over scope"
+    },
+    "status": {
+      "type": "object",
+      "required": [
+        "status_list"
+      ],
+      "properties": {
+        "status_list": {
+          "type": "object",
+          "required": [
+            "uri",
+            "idx"
+          ],
+          "properties": {
+            "uri": {
+              "type": "string",
+              "format": "uri"
+            },
+            "idx": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        }
+      }
+    }
+  }
+}
