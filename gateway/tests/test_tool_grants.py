@@ -310,3 +310,36 @@ def test_no_grant_in_process_is_unchanged():
     from mcp_server.api import routes_mcp  # noqa: PLC0415
 
     assert len(routes_mcp.search(query="SPR", limit=100)) == 100
+
+
+def test_batch_request_without_a_grant_gets_nothing(served):
+    """A JSON-RPC batch slips past a check that only looks at single tools/call bodies; it must still fail closed."""
+    import json as _json  # noqa: PLC0415
+    import urllib.request  # noqa: PLC0415
+
+    base, _ = served
+    batch = [{"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+              "params": {"name": "search", "arguments": {"query": "P0011", "urn": "SCH04"}}}]  # fmt: skip
+    req = urllib.request.Request(  # noqa: S310
+        f"{base}/mcp/",
+        data=_json.dumps(batch).encode(),
+        headers={"content-type": "application/json", "accept": "application/json, text/event-stream"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310
+            body = resp.read().decode()
+    except urllib.error.HTTPError as e:
+        body = e.read().decode()
+    assert "P0011" not in body
+
+
+def test_http_call_that_reaches_a_tool_without_a_grant_is_refused():
+    """Fail closed at the tool too: whatever route got an HTTP call past the middleware, no grant means no data."""
+    from mcp_server.api import routes_mcp  # noqa: PLC0415
+
+    marker = tg.over_http.set(True)
+    try:
+        with pytest.raises(ToolError, match="GRANT_MISSING"):
+            routes_mcp.search(query="P0011", urn="SCH04")
+    finally:
+        tg.over_http.reset(marker)

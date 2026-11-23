@@ -155,6 +155,10 @@ class CreateBody(BaseModel):
 @app.post("/internal/requests")
 def create_request(body: CreateBody):
     claims = verify_call(body.call, "request")
+    if "parent" in claims:
+        # one level of delegation: a supplementary mandate can't ask for more (its grandchild would outlive a
+        # revocation of the original, which the parent check doesn't follow)
+        raise Refused("REQUEST_INVALID", "ask with the original mandate, not a supplementary one")
     args = body.call["arguments"]
     held = args.get("held")
     clearance, ttl, reason = args.get("clearance"), args.get("ttl", 3600), args.get("reason", "")
@@ -281,6 +285,16 @@ def mint_for(r: dict, approved: dict, approved_by: dict) -> tuple[str, str]:
     return token, jti
 
 
+def _check_mintable(r: dict, approved: dict) -> None:
+    """Everything that could stop minting, checked before the decision is recorded, so an approval never
+    strands a request as approved with no mandate."""
+    if r["parent_exp"] - int(time.time()) <= 0:
+        raise Refused("PARENT_EXPIRED", "the requesting mandate has expired")
+    if over := within_ceiling(_json_file("principals.json").get(r["principal"]), approved["scope"],
+                              approved["clearance"]):  # fmt: skip
+        raise Refused("EXCEEDS_PRINCIPAL", over)
+
+
 def _approve_or_reject(r: dict, decision: str, approved_by: dict, narrowed: dict | None) -> dict:
     if decision not in ("approve", "reject"):
         raise Refused("DECISION_INVALID", "decision must be approve or reject")
@@ -294,6 +308,7 @@ def _approve_or_reject(r: dict, decision: str, approved_by: dict, narrowed: dict
         flush_events()
         return agent_view(r)
     approved = _approved_grant(r, narrowed)
+    _check_mintable(r, approved)  # the person's ceiling is re-read here: it may have changed since the request
     try:
         r = store().decide(r["id"], "approved", approved_by, approved)
     except AlreadyDecided as e:
@@ -323,8 +338,12 @@ def supervisor_decision(rid: str, body: SupervisorBody):
         store().refuse(rid, code)
         raise Refused(code, detail, **extra)
 
+    if args.get("request_id") != rid:
+        refuse("CALL_INVALID", "the signed decision names a different request")
     if r["status"] != "pending":
         refuse("ALREADY_DECIDED", r["status"])
+    if r["held"]:
+        refuse("EXCEEDS_SUPERVISOR", "releasing a held call needs a person", next_action="ask_user")
     if claims.get("can_delegate") is not True:
         refuse("EXCEEDS_SUPERVISOR", "the supervisor's mandate does not allow delegation", next_action="ask_user")
     if (claims.get("delegator") or {}).get("principal") != r["principal"]:

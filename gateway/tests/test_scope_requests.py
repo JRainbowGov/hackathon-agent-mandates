@@ -426,3 +426,68 @@ def test_held_call_with_different_arguments(flow):
     held = {"decision_id": did, "server": "pupil-data", "tool": "write", "arguments": {**WRITE, "value": "0"}}
     status, resp = f["request"](token, held=held)
     assert (status, resp["decision"]["reason_code"]) == (403, "REQUEST_INVALID")
+
+
+# ---------------------------------------------------------------- hardening (review findings)
+
+
+def test_supervisor_cannot_release_a_held_call(flow):
+    f = flow
+    helper_key, _ = generate_keypair()
+    scope = [{"server": "pupil-data", "tools": ["write"], "constraints": {"urn": ["SCH04"]}}]
+    helper = f["mandate"](scope, key=helper_key, deny=[], clearance=4)
+    supervisor = f["mandate"](scope, deny=[], clearance=4, can_delegate=True)
+    _, held = f["call"](f["client"], helper, "pupil-data", "write", key=helper_key, **WRITE)
+    did = held["decision"]["decision_id"]
+    v = f["request"](
+        helper, key=helper_key, held={"decision_id": did, "server": "pupil-data", "tool": "write", "arguments": WRITE}
+    )[1]
+    rid = v["result"]["request_id"]
+    status, resp = f["call"](f["client"], supervisor, "grants", "decide", request_id=rid, decision="approve")
+    assert (status, resp["decision"]["reason_code"]) == (403, "EXCEEDS_SUPERVISOR")
+    assert f["ic"].get(f"/requests/{rid}/view").json()["status"] == "pending"
+
+
+def test_signed_decision_is_bound_to_its_request(flow):
+    f = flow
+    helper_key, _ = generate_keypair()
+    helper = f["mandate"](roster("SCH01"), key=helper_key, clearance=2)
+    a = f["request"](helper, key=helper_key, scope=roster("SCH04"))[1]["result"]["request_id"]
+    b = f["request"](helper, key=helper_key, scope=roster("SCH02"))[1]["result"]["request_id"]
+    supervisor = f["mandate"](roster("SCH02") + roster("SCH04"), clearance=2, can_delegate=True)
+    signed_for_a = cli.sign_request(cli.priv_from_pem((f["state"] / "agent.pem").read_bytes()), server="grants",
+                                    tool="decide", mandate=supervisor,
+                                    arguments={"request_id": a, "decision": "approve"})  # fmt: skip
+    r = f["ic"].post(f"/internal/requests/{b}/supervisor-decision", json={"call": signed_for_a})
+    assert (r.status_code, r.json()["error"]) == (403, "CALL_INVALID")
+    assert f["ic"].get(f"/requests/{b}/view").json()["status"] == "pending"
+
+
+def test_request_id_cannot_smuggle_a_query(flow):
+    f = flow
+    victim = f["mandate"](roster("SCH04"), clearance=2)
+    v = f["request"](victim, scope=roster("SCH02"))[1]["result"]
+    attacker = f["mandate"](roster("SCH04"), clearance=2)
+    sneaky = f"{v['request_id']}?requester_jti={jti_of(victim)}&x="
+    status, resp = f["call"](f["client"], attacker, "grants", "status", request_id=sneaky)
+    assert (status, resp["decision"]["reason_code"]) == (403, "REQUEST_INVALID")
+
+
+def test_supplementary_mandate_cannot_ask_for_more(flow):
+    f = flow
+    parent = f["mandate"](roster("SCH04"), clearance=2)
+    v = f["request"](parent, scope=roster("SCH02"))[1]["result"]
+    f["decide"](v["request_id"], v["user_code"], session=f["login"]())
+    child = f["call"](f["client"], parent, "grants", "status", request_id=v["request_id"])[1]["result"]["mandate"]
+    status, resp = f["request"](child, scope=roster("SCH03"))
+    assert (status, resp["decision"]["reason_code"]) == (403, "REQUEST_INVALID")
+
+
+def test_ceiling_rechecked_at_approval(flow):
+    f = flow
+    v = f["request"](f["mandate"](roster("SCH04"), clearance=2), scope=roster("SCH02"))[1]["result"]
+    narrower = {PRINCIPAL: {**CEILING[PRINCIPAL], "urns": ["SCH04"]}}
+    (f["state"] / "principals.json").write_text(json.dumps(narrower))  # the person lost Brookmere meanwhile
+    r = f["decide"](v["request_id"], v["user_code"], session=f["login"]())
+    assert (r.status_code, r.json()["error"]) == (403, "EXCEEDS_PRINCIPAL")
+    assert f["ic"].get(f"/requests/{v['request_id']}/view").json()["status"] == "pending"

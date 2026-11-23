@@ -41,6 +41,8 @@ PUPIL_ID = re.compile(r"^P\d{4}$")
 
 # the verified grant for the tool call being served over HTTP; None for in-process calls
 current_grant: contextvars.ContextVar[Grant | None] = contextvars.ContextVar("current_grant", default=None)
+# set for every request that came in over HTTP through GrantMiddleware: such a call must carry a grant
+over_http: contextvars.ContextVar[bool] = contextvars.ContextVar("over_http", default=False)
 
 
 class GrantError(Exception):
@@ -319,6 +321,10 @@ def granted(level_of):
         def tool(*args, **kwargs):
             grant = current_grant.get()
             if grant is None:
+                if over_http.get():  # fail closed: an HTTP tool call that reached here without a verified grant
+                    from fastmcp.exceptions import ToolError  # noqa: PLC0415
+
+                    raise ToolError("GRANT_MISSING")
                 return fn(*args, **kwargs)
             bound = sig.bind(*args, **kwargs)
             bound.apply_defaults()
@@ -361,7 +367,16 @@ class GrantMiddleware:
         self.seen = SeenGrants()
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] != "http" or scope.get("method") != "POST":
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        marker = over_http.set(True)
+        try:
+            return await self._handle(scope, receive, send)
+        finally:
+            over_http.reset(marker)
+
+    async def _handle(self, scope, receive, send):
+        if scope.get("method") != "POST":
             return await self.app(scope, receive, send)
         body = b""
         more = True

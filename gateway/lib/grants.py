@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import urllib.parse
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -33,6 +35,7 @@ GRANTS_TOOLS = {
     "status": "A scope request's state (request_id); returns the new mandate once approved.",
     "decide": "A supervising agent's decision (request_id, decision, approved) on a helper's request.",
 }
+REQUEST_ID = re.compile(r"^sr_[A-Za-z0-9_-]{6,40}$")
 ISSUER_URL = os.environ.get("ISSUER_URL", "http://issuer:8083").rstrip("/")
 NEXT_ACTION = {
     "pending": "ask_user",
@@ -108,7 +111,8 @@ def _self(claims: dict, revoked) -> Outcome:
         "summary": grants_words(scope, clearance=claims.get("clearance")) + f" Valid {until(claims['exp'])}.",
     }
     try:
-        data["pending_requests"] = issuer_call("GET", f"/internal/requests?requester_jti={claims['jti']}")["requests"]
+        query = urllib.parse.urlencode({"requester_jti": claims["jti"]})
+        data["pending_requests"] = issuer_call("GET", f"/internal/requests?{query}")["requests"]
     except IssuerRefused:
         data["pending_requests"] = None
     return Outcome(data=data)
@@ -177,6 +181,8 @@ async def _held_matches(claims: dict, held: dict) -> str | None:
 
 async def _request(claims: dict, body: dict, decision_id: str) -> Outcome:
     args = body["arguments"]
+    if "parent" in claims:
+        return refused("REQUEST_INVALID", "ask with the original mandate, not a supplementary one")
     held = args.get("held")
     if held is not None:
         if not isinstance(held, dict) or (problem := await _held_matches(claims, held)):
@@ -202,10 +208,11 @@ async def _request(claims: dict, body: dict, decision_id: str) -> Outcome:
 
 def _status(claims: dict, arguments: dict) -> Outcome:
     rid = arguments.get("request_id")
-    if not isinstance(rid, str):
-        return refused("REQUEST_INVALID", "status needs request_id")
+    if not isinstance(rid, str) or not REQUEST_ID.match(rid):
+        return refused("REQUEST_INVALID", "status needs a request_id like sr_...")
+    query = urllib.parse.urlencode({"requester_jti": claims["jti"]})
     try:
-        view = issuer_call("GET", f"/internal/requests/{rid}?requester_jti={claims['jti']}")
+        view = issuer_call("GET", f"/internal/requests/{rid}?{query}")
     except IssuerRefused as e:
         if e.code in ("OUT_OF_SCOPE", "ISSUER_404"):
             return refused("OUT_OF_SCOPE", "no such request for this mandate")
@@ -215,8 +222,8 @@ def _status(claims: dict, arguments: dict) -> Outcome:
 
 def _decide(claims: dict, body: dict) -> Outcome:
     rid = body["arguments"].get("request_id")
-    if not isinstance(rid, str):
-        return refused("REQUEST_INVALID", "decide needs request_id")
+    if not isinstance(rid, str) or not REQUEST_ID.match(rid):
+        return refused("REQUEST_INVALID", "decide needs a request_id like sr_...")
     if claims.get("can_delegate") is not True:
         return refused("EXCEEDS_SUPERVISOR", "this mandate does not allow delegation")
     try:
