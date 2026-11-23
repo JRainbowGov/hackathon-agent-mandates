@@ -15,8 +15,11 @@ SERVER_LEVELS: dict[str, int] = {
     "special": 4,
 }
 
-# Servers that keep today's behaviour for mandates without a clearance claim (the eval, Day 2's default mandate).
+# Servers that keep today's decisions for mandates without a clearance claim (the eval, Day 2's default mandate).
 LEGACY_SERVERS = frozenset({"pupil-data"})
+# ...but what such a mandate is sent stops here: special category columns (ethnicity, care status) need an
+# explicit clearance of 4. Applied in the tool grant, so the server drops those columns from every row.
+LEGACY_LEVEL = 3
 
 
 def check_clearance(server: str, claims: dict) -> tuple[str, str, str] | None:

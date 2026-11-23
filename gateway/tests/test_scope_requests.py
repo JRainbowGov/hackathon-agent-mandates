@@ -324,6 +324,89 @@ def test_supervisor_passes_down_part_of_its_access(flow):
     assert jwt.decode(child, options={"verify_signature": False})["approved_by"]["kind"] == "agent"
 
 
+def _supervised_child(f, supervisor):
+    """A helper's SCH04 roster grant, approved by `supervisor`: (helper key, minted mandate)."""
+    helper_key, _ = generate_keypair()
+    helper = f["mandate"](roster("SCH01"), key=helper_key, clearance=2)
+    v = f["request"](helper, key=helper_key, scope=roster("SCH04"))[1]["result"]
+    status, resp = f["call"](f["client"], supervisor, "grants", "decide", request_id=v["request_id"],
+                             decision="approve")  # fmt: skip
+    assert (status, resp["result"]["status"]) == (200, "approved")
+    child = f["call"](f["client"], helper, "grants", "status", key=helper_key,
+                      request_id=v["request_id"])[1]["result"]["mandate"]  # fmt: skip
+    return helper_key, child
+
+
+def test_approvals_die_with_the_supervisor(flow):
+    # a supervising agent found to be compromised: revoking it withdraws everything it approved
+    f = flow
+    supervisor = f["mandate"](roster("SCH04"), clearance=2, can_delegate=True)
+    helper_key, child = _supervised_child(f, supervisor)
+    claims = jwt.decode(child, options={"verify_signature": False})
+    assert claims["approved_by"]["mandate_jti"] == jti_of(supervisor)
+    assert f["call"](f["client"], child, "directory", "roster", key=helper_key, **SCH04_Y11)[0] == 200
+
+    sup_idx = jwt.decode(supervisor, options={"verify_signature": False})["status"]["status_list"]["idx"]
+    cli.revoke_mandate(f["state"], sup_idx)
+    status, resp = f["call"](f["client"], child, "directory", "roster", key=helper_key, **SCH04_Y11)
+    assert (status, resp["decision"]["reason_code"]) == (403, "APPROVER_REVOKED")
+
+
+def test_supervisor_approval_ends_with_the_supervisor(flow):
+    f = flow
+    supervisor, _ = cli.issue_mandate(
+        f["state"], cli.priv_from_pem((f["state"] / "agent.pem").read_bytes()).public_key(), scope=roster("SCH04"),
+        deny=[], ttl=120, purpose="p", principal=PRINCIPAL, org="o", extra={"clearance": 2, "can_delegate": True},
+    )  # fmt: skip
+    _, child = _supervised_child(f, supervisor)  # the helper asked for an hour
+    exp = lambda t: jwt.decode(t, options={"verify_signature": False})["exp"]  # noqa: E731
+    assert exp(child) <= exp(supervisor)
+
+
+def test_agent_approved_mandate_without_approver_status_is_refused(flow):
+    # a minted mandate that says an agent approved it but can't be traced to that agent's status fails closed
+    f = flow
+    token = f["mandate"](roster("SCH04"), clearance=2,
+                         approved_by={"kind": "agent", "id": "x", "mandate_jti": "urn:uuid:gone"})  # fmt: skip
+    status, resp = f["call"](f["client"], token, "directory", "roster", **SCH04_Y11)
+    assert (status, resp["decision"]["reason_code"]) == (403, "STATUS_UNAVAILABLE")
+
+
+def test_approval_page_shows_what_was_already_approved(flow):
+    # ten narrow approvals must not look like ten small asks: the page lists what earlier approvals still grant
+    f = flow
+    parent = f["mandate"](roster("SCH04"), clearance=2)
+    session = f["login"]()
+    first = f["request"](parent, scope=roster("SCH02"))[1]["result"]
+    f["decide"](first["request_id"], first["user_code"], session=session)
+    second = f["request"](parent, scope=roster("SCH03"))[1]["result"]
+
+    view = f["ic"].get(f"/requests/{second['request_id']}/view", headers={"x-approver-session": session}).json()
+    (earlier,) = view["already_approved"]
+    assert earlier["request_id"] == first["request_id"]
+    assert "Brookmere High School (SCH02)" in earlier["summary"]
+    assert "already_approved" not in f["ic"].get(f"/requests/{second['request_id']}/view").json()
+
+    # once that mandate is revoked it no longer counts
+    child = f["call"](f["client"], parent, "grants", "status", request_id=first["request_id"])[1]["result"]["mandate"]
+    child_idx = jwt.decode(child, options={"verify_signature": False})["status"]["status_list"]["idx"]
+    cli.revoke_mandate(f["state"], child_idx)
+    view = f["ic"].get(f"/requests/{second['request_id']}/view", headers={"x-approver-session": session}).json()
+    assert view["already_approved"] == []
+
+
+def test_narrowed_approval_describes_what_was_approved(flow):
+    f = flow
+    parent = f["mandate"](roster("SCH04"), clearance=2)
+    v = f["request"](parent, scope=roster("SCH02"), ttl=7200)[1]["result"]
+    assert "for 2 hours" in v["summary"]
+    f["decide"](v["request_id"], v["user_code"], session=f["login"](),
+                approved={"scope": roster("SCH02"), "clearance": 2, "ttl": 1800})  # fmt: skip
+    result = f["call"](f["client"], parent, "grants", "status", request_id=v["request_id"])[1]["result"]
+    assert "for 30 minutes" in result["summary"]
+    assert "for 30 minutes" in jwt.decode(result["mandate"], options={"verify_signature": False})["purpose"]
+
+
 def test_supervisor_cannot_pass_on_what_it_lacks(flow):
     f = flow
     helper_key, _ = generate_keypair()

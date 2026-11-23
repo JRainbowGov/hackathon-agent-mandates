@@ -173,6 +173,18 @@ def verify_mandate(token: str, registry, status_lists: dict[str, str]) -> dict:
                 raise Reject("PARENT_REVOKED", parent.get("jti", ""))
         except ValueError as e:
             raise Reject("STATUS_UNAVAILABLE", str(e))
+    # ...and with the supervising agent that approved it: revoking a compromised supervisor withdraws its approvals
+    approved_by = claims.get("approved_by")
+    if isinstance(approved_by, dict) and approved_by.get("kind") == "agent":
+        asl = approved_by.get("status") if isinstance(approved_by.get("status"), dict) else {}
+        approver_jwt = status_lists.get(asl.get("uri"))
+        if approver_jwt is None or "idx" not in asl:
+            raise Reject("STATUS_UNAVAILABLE", f"approver status list {asl.get('uri')}")  # fail closed
+        try:
+            if is_revoked(approver_jwt, asl["idx"], pub, asl["uri"]):
+                raise Reject("APPROVER_REVOKED", approved_by.get("mandate_jti", ""))
+        except ValueError as e:
+            raise Reject("STATUS_UNAVAILABLE", str(e))
     return claims
 
 

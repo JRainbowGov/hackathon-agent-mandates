@@ -9,7 +9,7 @@ from __future__ import annotations
 from tool_grants import DEFAULT_MAX_ROWS, mint
 
 from .audience import audience_pupils
-from .interfaces import SERVER_LEVELS
+from .interfaces import LEGACY_LEVEL, SERVER_LEVELS
 
 # rows a per-pupil count breakdown may have (the census has 7,449 rows); it is folded at the gateway, never released
 BREAKDOWN_MAX_ROWS = 20_000
@@ -19,8 +19,8 @@ def grant_fields(claims: dict, entry: dict, server: str) -> dict:
     """The subject, level and limit part of a grant, from verified claims and the matched entry only."""
     level = SERVER_LEVELS.get(server, 4)
     clearance = claims.get("clearance")
-    if type(clearance) is int:
-        level = min(level, clearance)
+    # no clearance claim: never special category, whatever the server could return
+    level = min(level, clearance if type(clearance) is int else LEGACY_LEVEL)
     constraints = entry.get("constraints", {})
     urns = constraints.get("urn")
     pupils = audience_pupils(entry)

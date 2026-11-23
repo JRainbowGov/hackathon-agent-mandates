@@ -111,9 +111,24 @@ def test_grant_ignores_arguments():
     assert payload["level"] == 2
 
 
-def test_claimless_mandate_gets_server_level():
+def test_claimless_mandate_never_gets_special_category():
+    # a mandate with no clearance keeps reaching pupil-data (question 0, the Day 2 default mandate), but its
+    # grant stops at level 3: ethnicity and care status need an explicit clearance of 4
     entry = {"server": "pupil-data", "tools": ["search"], "constraints": {"urn": ["SCH01"]}}
-    assert grant_fields({"jti": "j"}, entry, "pupil-data")["level"] == 4
+    assert grant_fields({"jti": "j"}, entry, "pupil-data")["level"] == 3
+    assert grant_fields({"jti": "j", "clearance": 4}, entry, "pupil-data")["level"] == 4
+
+
+def test_claimless_search_drops_special_category_columns(served):
+    base, priv = served
+    args = {"query": "P0004", "urn": "SCH01"}
+    entry = {"server": "pupil-data", "tools": ["search"], "constraints": {"urn": ["SCH01"]}}
+    fields = grant_fields({"jti": "j"}, entry, "pupil-data")
+    rows = _call(f"{base}/mcp/", "search", args, _mint(priv, tool="search", arguments=args, **fields))
+    assert rows
+    assert all(r["Psuedo ID"] == "P0004" for r in rows)
+    assert not {"Ethnicity", "InCareAtCurrentSchool"} & {k for r in rows for k in r}
+    assert "FSMeligible" in rows[0]  # level 3 still comes through
 
 
 # ---------------------------------------------------------------- over real HTTP
