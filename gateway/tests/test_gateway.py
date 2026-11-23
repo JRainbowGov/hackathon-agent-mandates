@@ -127,21 +127,27 @@ def test_issue_with_claims_of_your_own(gw, tmp_path, capsys):
     out = tmp_path / "m.jwt"
     issue = ["--state", str(state), "issue", "--agent-key", str(state / "agent.pem"), "-o", str(out)]
 
-    cli.main([*issue, "--claims", '{"clearance": 2}'])
+    def search_with(mandate):
+        body = cli.sign_request(
+            priv_from_pem((state / "agent.pem").read_bytes()),
+            server="pupil-data",
+            tool="search",
+            arguments={"query": "SPR", "urn": "SCH01"},
+            mandate=mandate,
+        )
+        r, _ = call(client, "search", body=body)
+        return r.status_code, r.json()["decision"]["reason_code"]
+
+    cli.main([*issue, "--claims", '{"team_note": "letters run"}'])
     capsys.readouterr()
     cli.main(["decode", str(out)])
-    assert json.loads(capsys.readouterr().out)["clearance"] == 2
+    assert json.loads(capsys.readouterr().out)["team_note"] == "letters run"
+    # the gateway ignores a claim it does not read, so the mandate still works
+    assert search_with(out.read_text()) == (200, "IN_SCOPE")
 
-    # the starter gateway ignores a claim it does not read, so the mandate still works
-    body = cli.sign_request(
-        priv_from_pem((state / "agent.pem").read_bytes()),
-        server="pupil-data",
-        tool="search",
-        arguments={"query": "SPR", "urn": "SCH01"},
-        mandate=out.read_text(),
-    )
-    r, _ = call(client, "search", body=body)
-    assert (r.status_code, r.json()["decision"]["decision"]) == (200, "ALLOW")
+    # clearance is read (add-interface-slices): pupil-data is level 4, so clearance 2 can't use it
+    cli.main([*issue, "--claims", '{"clearance": 2}'])
+    assert search_with(out.read_text()) == (403, "CLEARANCE_TOO_LOW")
 
     with pytest.raises(ValueError, match="scope"):
         cli.main([*issue, "--claims", '{"scope": []}'])

@@ -41,6 +41,23 @@ services:
       - BACKEND_URL=http://backend:8080
       - GATEWAY_URL=http://gateway:8082
 
+  # data-interface servers (schools, directory, special): read-only data, no published port, gateway-only
+  slices:
+    build:
+      context: .
+      dockerfile: ./data_slices/Dockerfile
+    volumes:
+      - ./mcp_server/data:/app/mcp_server/data:ro
+    container_name: data-slices
+    healthcheck:
+      test: [ "CMD", "curl", "--fail", "http://localhost:8090/healthcheck" ]
+      interval: 3s
+      timeout: 2s
+      retries: 3
+      start_period: 3s
+    networks:
+      - agent-mandate-hack-network
+
   gateway:
     build:
       context: .
@@ -51,7 +68,7 @@ services:
     volumes:
       - ./gateway/state:/app/gateway/state
     environment:
-      - MCP_SERVERS=pupil-data=http://backend:8080/mcp/
+      - MCP_SERVERS=pupil-data=http://backend:8080/mcp/,schools=http://slices:8090/schools/mcp/,directory=http://slices:8090/directory/mcp/,special=http://slices:8090/special/mcp/
       - GATEWAY_STATE_DIR=/app/gateway/state
       - LITELLM_KEY=${LITELLM_KEY:-}
       - LITELLM_BASE_URL=${LITELLM_BASE_URL:-}
@@ -65,6 +82,8 @@ services:
       - agent-mandate-hack-network
     depends_on:
       backend:
+        condition: service_healthy
+      slices:
         condition: service_healthy
 
 networks:
