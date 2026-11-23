@@ -91,6 +91,8 @@ services:
       - gateway-audit:/app/gateway/audit
     environment:
       - GATEWAY_MANIFEST_PATH=/app/data/synthetic_manifest.json
+      # the /demo walkthrough mints and revokes with no login: off unless set (and it needs the issuer key)
+      - GATEWAY_ENABLE_DEMO=${GATEWAY_ENABLE_DEMO:-}
       - GATEWAY_AUDIT_DB=/app/gateway/audit/audit.sqlite
       - GATEWAY_STATE_DB=/app/gateway/audit/gateway-state.sqlite
       - GATEWAY_SCHOOLS_PATH=/app/data/synthetic_schools.csv

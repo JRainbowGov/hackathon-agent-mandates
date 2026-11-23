@@ -9,7 +9,7 @@ install:
 	uv sync --extra fastapi --extra gateway --extra synth
 	docker compose build 
 
-.PHONY: synth
+.PHONY: synth deploy_up deploy_down deploy_check
 synth:  ## Regenerate mcp_server/data/synthetic (pupil census, deprivation, schools, display names) from mcp_server/synth/synth.yaml
 	uv run python -m mcp_server.synth
 
@@ -44,6 +44,18 @@ eval_build:  ## Mint the eval mandates + keys from gateway/state into eval_pack/
 
 eval_run:  ## Fire the eval cases for questions 0 to 5 at GATEWAY_URL (default localhost:8082)
 	uv run python -m gateway.eval run --pack eval_pack --url $${GATEWAY_URL:-http://localhost:8082}
+
+deploy_up:  ## Day 2: start the stack with only the gateway published (docs/deploy.md)
+	docker compose -f docker-compose.yaml -f docker-compose.deploy.yaml up -d --build --wait
+
+deploy_down:  ## Stop the deployed stack; keeps the audit and issuer volumes
+	docker compose -f docker-compose.yaml -f docker-compose.deploy.yaml down
+
+deploy_check:  ## Day 2 gate: the eval against DEPLOY_URL (e.g. make deploy_check DEPLOY_URL=https://gw.example)
+	@test -n "$(DEPLOY_URL)" || (echo "set DEPLOY_URL" && exit 1)
+	uv run python -m gateway.eval run --pack eval_pack --url $(DEPLOY_URL)
+	@curl -s -o /dev/null -w "demo routes: %{http_code} (want 404)\n" -X POST $(DEPLOY_URL)/demo/mandate -H 'content-type: application/json' -d '{}'
+	@curl -s $(DEPLOY_URL)/healthcheck/audit; echo "  (want sqlite, durable)"
 
 attack_mandates:  ## Day 2: issue the default mandate, and a feature mandate if FEATURE_SCOPE/FEATURE_CLAIMS are set, to each day_2_attack/keys/<team>.jwk
 	mkdir -p day_2_attack/keys day_2_attack/mandates

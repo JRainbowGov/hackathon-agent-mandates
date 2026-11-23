@@ -137,7 +137,15 @@ def test_tampered_mandate_is_denied(gw):
     assert (r.status_code, r.json()["decision"]["reason_code"]) == (403, "SIG_INVALID")
 
 
-def test_demo_walkthrough(gw):
+def test_demo_is_off_by_default(gw):
+    client, _, _ = gw
+    assert client.post("/demo/mandate", json={}).status_code == 404
+    assert client.post("/demo/revoke", json={"idx": 0}).status_code == 404
+    assert client.get("/demo/issuer").status_code == 404
+
+
+def test_demo_walkthrough(gw, monkeypatch):
+    monkeypatch.setenv("GATEWAY_ENABLE_DEMO", "1")
     client, _, _ = gw
     m = client.post("/demo/mandate", json={"urn": "SCH01"}).json()
     assert m["header"]["typ"] == "mandate+jwt"
@@ -232,3 +240,12 @@ def test_eval_set_passes_against_template_gateway(gw, tmp_path):
     # questions 3 to 5 are the teams' build work, so only the starter's questions 0 to 2 must pass
     assert [line for ok, line in results if not ok and line[:2] in {"Q0", "Q1", "Q2"}] == []
     assert len(results) == len(ev.VALID) + len(ev.INVALID) + len(ev.BUILD)
+
+
+def test_expired_means_expired(gw, monkeypatch):
+    """No grace on exp: one second past expiry is EXPIRED, however small the clock skew allowance."""
+    client, call, state = gw
+    mandate_claims = json.loads(cli.b64u_decode((state / "mandate.jwt").read_text().split(".")[1]))
+    monkeypatch.setattr("gateway.lib.gateway_verify.time.time", lambda: mandate_claims["exp"] + 1)
+    r, _ = call(client, "search", query="P0004", urn="SCH01")
+    assert (r.status_code, r.json()["decision"]["reason_code"]) == (403, "EXPIRED")

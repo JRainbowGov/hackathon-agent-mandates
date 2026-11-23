@@ -5,16 +5,26 @@ shortcut: a real agent holds its own key; this is for teaching only, never deplo
 """
 
 import json
+import os
 
 import jwt
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from gateway.cli import issue_mandate, load_or_create_key, revoke_mandate, sign_request
 from gateway.lib.gateway_verify import Request
 
-router = APIRouter(prefix="/demo", tags=["demo"])
+DEMO_ENV = "GATEWAY_ENABLE_DEMO"
+
+
+def demo_enabled() -> None:
+    """The demo mints and revokes with the issuer key and has no login: off unless explicitly turned on."""
+    if os.environ.get(DEMO_ENV, "").strip().lower() not in ("1", "true", "yes", "on"):
+        raise HTTPException(404, "Not Found")
+
+
+router = APIRouter(prefix="/demo", tags=["demo"], dependencies=[Depends(demo_enabled)])
 
 
 def _gw():

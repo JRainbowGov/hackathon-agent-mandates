@@ -150,7 +150,8 @@ def verify_mandate(token: str, registry, status_lists: dict[str, str]) -> dict:
     now = time.time()
     if claims.get("nbf", 0) > now + CLOCK_SKEW:
         raise Reject("NOT_YET_VALID", claims["jti"])
-    if claims["exp"] < now - CLOCK_SKEW:
+    # no skew on expiry: a mandate is dead the second it expires (the skew only forgives early clocks on nbf)
+    if claims["exp"] <= now:
         raise Reject("EXPIRED", claims["jti"])
 
     sl = claims["status"]["status_list"]
