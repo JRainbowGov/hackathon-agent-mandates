@@ -1,0 +1,55 @@
+# Dev-only observability and audit store, layered on the base stack:
+#   docker compose -f docker-compose.yaml -f docker-compose.observability.yaml up -d --wait   (or: make obs_up)
+#
+# Host ports bind to 127.0.0.1 only. Do NOT publish Postgres or the Jaeger UI/OTLP ports on a deployed (Day 2)
+# gateway: Postgres holds the audit trail and the trace UI is unauthenticated. See docs/dev-scaffold.md.
+
+services:
+
+  postgres:
+    image: postgres:17-alpine
+    container_name: gateway-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in .env (see .env.example)}
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env (see .env.example)}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env (see .env.example)}
+      GATEWAY_DB_USER: ${GATEWAY_DB_USER:?set GATEWAY_DB_USER in .env (see .env.example)}
+      GATEWAY_DB_PASSWORD: ${GATEWAY_DB_PASSWORD:?set GATEWAY_DB_PASSWORD in .env (see .env.example)}
+    volumes:
+      - gateway-pgdata:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-55432}:5432"
+    healthcheck:
+      # healthy only once init has run and the gateway role can log in
+      test: [ "CMD-SHELL", "PGPASSWORD=\"$$GATEWAY_DB_PASSWORD\" psql -h 127.0.0.1 -U \"$$GATEWAY_DB_USER\" -d \"$$POSTGRES_DB\" -tAc 'select 1 from gateway.schema_version limit 1' | grep -q 1" ]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    networks:
+      - agent-mandate-hack-network
+
+  jaeger:
+    # all-in-one: OTLP receiver (4317 gRPC, 4318 HTTP), in-memory storage, UI on 16686
+    image: jaegertracing/jaeger:2.10.0
+    container_name: gateway-jaeger
+    ports:
+      - "127.0.0.1:${JAEGER_UI_PORT:-16686}:16686"
+      - "127.0.0.1:${OTLP_HTTP_HOST_PORT:-4318}:4318"
+    networks:
+      - agent-mandate-hack-network
+
+  gateway:
+    environment:
+      - GATEWAY_DATABASE_URL=postgresql://${GATEWAY_DB_USER}:${GATEWAY_DB_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318
+      - OTEL_SERVICE_NAME=mandate-gateway
+    depends_on:
+      postgres:
+        condition: service_healthy
+      jaeger:
+        condition: service_started
+
+volumes:
+  gateway-pgdata:
