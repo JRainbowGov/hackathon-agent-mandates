@@ -55,7 +55,7 @@ def validate_entry(entry) -> None:
         audience_pupils(entry)
     except ValueError as e:
         raise Invalid(str(e)) from e
-    extra = set(entry) - {"server", "tools", "constraints", "audience", "max_rows"}
+    extra = set(entry) - {"server", "tools", "constraints", "audience", "max_rows", "rate"}
     if extra:
         raise Invalid(f"unknown keys in a scope entry: {sorted(extra)}")
 

@@ -507,3 +507,19 @@ def test_check_gives_the_safe_counts_answer(flow):
     assert status == 403
     assert checked["result"]["reason_code"] == real["decision"]["reason_code"]
     assert checked["result"]["decision"] == "DENY"
+
+
+def test_minted_mandate_shares_the_parents_budget_and_rate(flow):
+    """run budgets count per family but read their size from the calling mandate (add-run-budgets)."""
+    f = flow
+    scope = [{"server": "directory", "tools": ["roster"], "constraints": {"urn": ["SCH02", "SCH04"]},
+              "rate": {"per_minute": 5, "max_calls": 50}}]  # fmt: skip
+    parent = f["mandate"](scope, clearance=2, budget={"distinct_pupils": 40})
+    v = f["request"](parent, scope=roster("SCH02") + roster("SCH01"), clearance=2)[1]["result"]
+    f["decide"](v["request_id"], v["user_code"], session=f["login"]())
+    child = f["call"](f["client"], parent, "grants", "status", request_id=v["request_id"])[1]["result"]["mandate"]
+    claims = jwt.decode(child, options={"verify_signature": False})
+    assert claims["budget"] == {"distinct_pupils": 40}
+    by_urn = {e["constraints"]["urn"][0]: e for e in claims["scope"]}
+    assert by_urn["SCH02"]["rate"] == {"per_minute": 5, "max_calls": 50}  # narrows a parent entry: keeps its rate
+    assert "rate" not in by_urn["SCH01"]  # new access: no parent entry to inherit from

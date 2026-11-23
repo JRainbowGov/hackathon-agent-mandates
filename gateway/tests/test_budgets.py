@@ -137,7 +137,10 @@ def test_a_supplementary_mandate_shares_its_parents_budget(gw):  # noqa: F811
     for p in pupils[:3]:
         assert caller(state, parent)(client, "pupil-data", "pupil", pupil_id=p, urn="SCH05").status_code == 200
     # the issuer copies the parent's budget into the supplementary mandate, which points at its parent
-    child = pupil_mandate(state, "child.jwt", claims={**budget, "parent": {"jti": claims_of(parent)["jti"]}})
+    # a real parent claim names its status list too: the gateway refuses a child whose parent it can't check
+    pclaims = claims_of(parent)
+    parent_ref = {"jti": pclaims["jti"], "status": pclaims["status"]["status_list"]}
+    child = pupil_mandate(state, "child.jwt", claims={**budget, "parent": parent_ref})
     r = caller(state, child)(client, "pupil-data", "pupil", pupil_id=pupils[3], urn="SCH05")
     assert (r.status_code, r.json()["decision"]["reason_code"]) == (429, "BUDGET_EXHAUSTED")
 

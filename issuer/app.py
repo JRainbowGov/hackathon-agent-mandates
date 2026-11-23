@@ -38,6 +38,7 @@ from gateway.lib.scope_math import (
     Invalid,
     already_granted,
     clearance_covers,
+    entry_covers,
     narrower_or_equal,
     scope_covers,
     validate_request,
@@ -207,6 +208,7 @@ def create_request(body: CreateBody):
             "summary": summary,
             "public_summary": public_summary,
             "parent_scope": claims.get("scope", []),
+            "parent_budget": claims.get("budget"),  # run budgets: copied unchanged into what's minted
             "level_4": marks_level_4(scope, clearance),
         },
         request_key=request_key,
@@ -253,6 +255,16 @@ def _approved_grant(r: dict, narrowed: dict | None) -> dict:
     return approved
 
 
+def _with_parent_rate(entry: dict, parent_scope: list[dict]) -> dict:
+    """The entry, with the rate of the parent entry it narrows (if any, and if it has none of its own)."""
+    if "rate" in entry:
+        return entry
+    for held in parent_scope:
+        if "rate" in held and entry_covers(held, entry):
+            return {**entry, "rate": held["rate"]}
+    return entry
+
+
 def mint_for(r: dict, approved: dict, approved_by: dict) -> tuple[str, str]:
     now = int(time.time())
     ttl = min(approved["ttl"], r["parent_exp"] - now)
@@ -264,6 +276,11 @@ def mint_for(r: dict, approved: dict, approved_by: dict) -> tuple[str, str]:
         "parent": {"jti": r["requester_jti"], "status": r["parent_status"], "mandate_hash": r["parent_mandate_hash"]},
         "approved_by": {**approved_by, "request_id": r["id"]},
     }
+    # run budgets count per family but read their size from the calling mandate, so a child carries its
+    # parent's budget unchanged, and each entry that narrows a parent entry keeps that entry's rate
+    if r["requested"].get("parent_budget") is not None:
+        extra["budget"] = r["requested"]["parent_budget"]
+    scope = [_with_parent_rate(e, r["requested"]["parent_scope"]) for e in approved["scope"]]
     clearance = approved["clearance"] if approved["clearance"] is not None else r["parent_clearance"]
     if clearance is not None:
         extra["clearance"] = clearance
@@ -273,7 +290,7 @@ def mint_for(r: dict, approved: dict, approved_by: dict) -> tuple[str, str]:
     token, _idx = issue_mandate(
         STATE_DIR,
         jwk_to_pub(r["cnf_jwk"]),
-        scope=approved["scope"],
+        scope=scope,
         deny=r["deny"],
         ttl=ttl,
         purpose=r["requested"]["summary"][:500],

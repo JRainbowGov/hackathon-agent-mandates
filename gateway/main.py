@@ -226,8 +226,6 @@ async def _grants(body: CallBody, ctx: AuditContext, decision_id: str):
     return HTTPStatus.OK, outcome.data, None, None
 
 
-
-
 @app.post("/tools/call")
 async def tools_call(body: CallBody, http: HTTPRequest = None):  # None when called in-process (demo)
     gateway: Gateway = state["gateway"]
