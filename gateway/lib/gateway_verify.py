@@ -12,6 +12,7 @@ count them. Order of checks is deliberate: cheapest and most definitive first.
 from __future__ import annotations
 
 import fnmatch
+import posixpath
 import time
 from dataclasses import asdict, dataclass
 
@@ -115,7 +116,13 @@ def check_request(req: Request, scope: list[dict], deny: list[str], step_up_patt
         for k, allowed in entry.get("constraints", {}).items():
             if k not in req.arguments:
                 return "DENY", "CONSTRAINT_MISSING", k
-            if str(req.arguments[k]) not in set(map(str, allowed)):
+            value = req.arguments[k]
+            if k == "path" and isinstance(value, str):
+                # one file, one spelling: "./a//b" and "a/x/../b" compare as "a/b". Anything still starting
+                # with ".." or "/" cannot equal an allowed relative path, so it stays denied.
+                # shortcut: lexical only, agrees with the MCP server's resolve() while the data dir has no symlinks
+                value = posixpath.normpath(value)
+            if str(value) not in set(map(str, allowed)):
                 return "DENY", "CONSTRAINT_VIOLATED", f"{k}={req.arguments[k]!r}"
         limit = req.arguments.get("limit", MAX_ROWS)
         if type(limit) is not int or not 0 <= limit <= MAX_ROWS:

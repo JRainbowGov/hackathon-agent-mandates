@@ -68,6 +68,27 @@ def test_bulk_export_is_denied(gw):
     assert r.status_code == 200, r.text
 
 
+def test_path_spellings(gw):
+    client, call, _ = gw
+    for path in ("./" + ev.SCHOOLS, ev.SCHOOLS.replace("/", "//"), "synthetic/x/../synthetic_schools.csv/"):
+        r, _ = call(client, "get", path=path)
+        assert r.status_code == 200, path
+        assert r.json()["result"][0]["URN"] == "SCH01"
+    for path in (
+        "synthetic/../synthetic/synthetic_display_names.csv",
+        "/" + ev.SCHOOLS,
+        "../data/" + ev.SCHOOLS,
+        ev.SCHOOLS + "/../synthetic_display_names.csv",
+        ev.SCHOOLS.upper(),
+        ev.SCHOOLS + "\x00",
+        "",
+        123,
+        [ev.SCHOOLS],
+    ):
+        r, _ = call(client, "get", path=path)
+        assert (r.status_code, r.json()["decision"]["reason_code"]) == (403, "CONSTRAINT_VIOLATED"), path
+
+
 def test_tampered_mandate_is_denied(gw):
     client, call, state = gw
     mandate = (state / "mandate.jwt").read_text()
