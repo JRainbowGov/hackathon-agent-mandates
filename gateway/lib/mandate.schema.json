@@ -164,6 +164,17 @@
           }
         }
       }
+    },
+    "counts": {
+      "type": "object",
+      "description": "Safe counts for pupil-data.aggregate (docs/safe-counts.md). The gateway always refuses identifier columns, level-4 columns without clearance 4, more than 2 group_by columns and where on level 3-4 columns; it counts distinct pupils, drops groups smaller than k, hides counts and complements of 1-4, and rounds to 5. This claim can only make it stricter.",
+      "properties": {
+        "k": {
+          "type": "integer",
+          "minimum": 10,
+          "description": "Minimum pupils per released group; values below the default 10 are ignored."
+        }
+      }
     }
   }
 }

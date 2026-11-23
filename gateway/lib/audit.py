@@ -45,7 +45,7 @@ PUPIL_KEYS = ("Psuedo ID", "pupil_id")
 PUPIL_ID = re.compile(r"^P\d{4}$")
 UNLISTED_LEVEL = 4
 # Columns that tools derive rather than read from a table. Gateway policy; moves to the access config when it lands.
-COLUMN_LEVEL_OVERRIDES = {"letter": 2}
+COLUMN_LEVEL_OVERRIDES = {"letter": 2, "total": 1, "count": 1, "suppressed_groups": 1}  # aggregates are not data
 DEFAULT_MANIFEST = Path(__file__).resolve().parents[2] / "mcp_server/data/synthetic/synthetic_manifest.json"
 APPROVAL_EVENTS = ("approval_requested", "approval_granted", "approval_denied", "approval_expired")
 # Servers the gateway answers itself. Their results are gateway metadata, not table rows, so they are scored at the
@@ -159,7 +159,7 @@ def _pupils_in(data: Any, found: set[str]) -> None:
             _pupils_in(v, found)
 
 
-def summarise(data: Any, server: str | None = None) -> Summary:
+def summarise(data: Any, server: str | None = None, *, min_level: int | None = None) -> Summary:
     """What a result handed to the agent: row count, pupil IDs, column names, highest PII level, a hash.
 
     A result from a server the gateway answers itself (`audit`, `grants`) has no table columns and is scored at that
@@ -174,6 +174,8 @@ def summarise(data: Any, server: str | None = None) -> Summary:
     rows = _rows_of(data)
     columns = sorted({k for r in rows for k in r})
     level = max((column_level(c) for c in columns), default=None)
+    if min_level is not None and data not in (None, [], {}):  # e.g. counts: the level of what was counted
+        level = max(level or 0, min_level)
     if level is None and data not in (None, [], {}):
         # a document (a JSON file, classification(), an audit read): no table columns; pupil IDs make it level 2
         level = 2 if pupils else 1

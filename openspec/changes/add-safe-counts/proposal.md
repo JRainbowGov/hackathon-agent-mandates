@@ -45,5 +45,5 @@ None. `pupil-data` itself is unchanged (`data-interfaces`' "pupil-data is unchan
 - **Changed code:**
   - `gateway/main.py`: the column check before forwarding, and the rewrite after it.
   - `gateway/lib/audit.py`: scoring counts results by their group columns.
-- **Upstream calls:** every allowed `aggregate` makes one extra internal call to the data server. Coordinate with the scope-requests change, whose tool grants would need to cover it.
+- **Upstream calls:** every allowed `aggregate` is sent upstream as its per-pupil breakdown instead of as written. Coordinate with the scope-requests change: its tool grant for this call must allow the extra `Psuedo ID` group column.
 - **Questions:** 8, and part of 15. Day 2: closes the confirmed level-4 path through counts and the Bulk path through `group_by` on pupil IDs.

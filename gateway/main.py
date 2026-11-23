@@ -10,6 +10,7 @@ import logging
 import os
 import uuid
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from http import HTTPStatus
 from pathlib import Path
 
@@ -21,7 +22,7 @@ from fastmcp.exceptions import ToolError
 from pydantic import BaseModel
 
 from gateway.cli import sign_request
-from gateway.lib import audit
+from gateway.lib import audit, safe_counts
 from gateway.lib.common import generate_keypair, pub_to_jwk
 from gateway.lib.gateway_verify import Gateway, Request
 from gateway.lib.interfaces import SERVER_LEVELS
@@ -141,7 +142,7 @@ def _mandate_revoked(event: dict) -> bool | None:
         return None
 
 
-async def _forward(body: CallBody):
+async def _forward(body: CallBody, k: int = safe_counts.DEFAULT_K):
     """(http_status, result data or None, error text or None) for an allowed call."""
     if body.server == AUDIT_SERVER:
         try:
@@ -151,11 +152,18 @@ async def _forward(body: CallBody):
     target = MCP_SERVERS.get(body.server)
     if target is None:
         return 404, None, f"no MCP server configured for {body.server!r}"
+    counts = safe_counts.applies(body.server, body.tool)
+    per_pupil = counts and safe_counts.has_pupils(str(body.arguments.get("table", "")))
+    # counts: the one upstream call is the per-pupil breakdown, which never leaves the gateway (add-safe-counts)
+    arguments = safe_counts.breakdown_arguments(body.arguments) if per_pupil else body.arguments
     try:
         async with Client(target) as client:
-            result = await client.call_tool(body.tool, body.arguments)
+            result = await client.call_tool(body.tool, arguments)
     except ToolError as e:
         return 502, None, str(e)
+    if counts:
+        rows = safe_counts.release(result.data, body.arguments["group_by"], k, per_pupil=per_pupil)
+        return 200, rows, None
     return 200, result.data, None
 
 
@@ -166,13 +174,17 @@ async def tools_call(body: CallBody, http: HTTPRequest = None):  # None when cal
     gateway.status_lists[state["status_uri"]] = (state["dir"] / "status_list.jwt").read_text().strip()
 
     decision, ctx = gateway.decide_with_context(Request(**body.model_dump()))
+    counts = decision.decision == "ALLOW" and safe_counts.applies(body.server, body.tool)
+    if counts and (refused := safe_counts.check(body.arguments, ctx.claims)):
+        decision = replace(decision, decision="DENY", reason_code=refused[0], detail=refused[1])
     record = {**decision.to_dict(), "decision_id": str(uuid.uuid4())}
 
     if decision.decision == "ALLOW":
-        status, data, error = await _forward(body)
+        status, data, error = await _forward(body, safe_counts.k_for(ctx.claims))
     else:
         status, data, error = (403 if decision.decision == "DENY" else 202), None, None
-    summary = audit.summarise(data, body.server) if status == HTTPStatus.OK else None
+    min_level = safe_counts.max_level(body.arguments) if counts else None
+    summary = audit.summarise(data, body.server, min_level=min_level) if status == HTTPStatus.OK else None
 
     try:
         await audit.record(

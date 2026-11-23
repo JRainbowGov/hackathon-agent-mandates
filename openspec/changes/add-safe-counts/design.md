@@ -31,8 +31,8 @@ Levels come from the same manifest `audit.column_level` reads.
 - *Why not in `check_request`?* It's tool-specific logic, and `check_request` is shared with the scope-requests change's `grants.check`. Keeping it in its own module avoids a three-way merge there, and `grants.check` can call `safe_counts.check` too.
 - *Alternative:* constrain `group_by` in each mandate's scope. Rejected: every issuer would have to remember it, and the starter mandate's leak shows they don't.
 
-### 2. Count pupils with one internal breakdown call
-After forwarding the agent's call, the gateway makes one more call to the same tool:
+### 2. Count pupils with one breakdown call, instead of the agent's call
+The gateway doesn't forward the agent's call as written. It makes one call to the same tool, the per-pupil breakdown (decided while implementing, 23 Nov: forwarding both would be a second upstream call whose result is thrown away):
 
 `aggregate(table, group_by + ["Psuedo ID"], measure, where)`
 
@@ -40,7 +40,7 @@ It returns one row per (group, pupil). The gateway folds it into:
 - `n`: pupils in the group;
 - `m`: pupils with `count > 0` in that group, meaning pupils whose matching rows have the flag at least once.
 
-The agent's own row result is discarded, and the gateway builds the released rows from `n` and `m`.
+The gateway builds the released rows from `n` and `m`; the per-pupil rows never leave it.
 - The internal call groups by `Psuedo ID`, which the rule refuses for agents. It never leaves the gateway, and it isn't recorded as an agent call.
 - Tables with no `Psuedo ID` column (schools) skip the breakdown and release rounded row counts.
 - *Alternative:* a new MCP tool for distinct pupil counts. Rejected for now: the scope-requests change is editing the MCP servers for tool grants, and one more tool there is a merge for little gain. When tool grants land, the gateway mints a grant for this internal call too (coordinate).
@@ -68,7 +68,7 @@ Its result shape stays one row per school with `total` and `count`. Only the num
 ## Risks / Trade-offs
 
 - **[Differencing across filters]** → `where` is limited to level-1 and level-2 columns, with at most 2 group columns. Rounding to 5 turns any difference into a range. A determined attacker with many queries can still narrow it; the query budget from `add-run-budgets` caps how many they get.
-- **[Doubled upstream cost per `aggregate`]** → One extra call over a 7,449-row CSV, about milliseconds.
+- **[Larger upstream result per `aggregate`]** → One call returning up to one row per pupil per group, still milliseconds over a 7,449-row CSV.
 - **[The internal call needs a tool grant once grants are enforced]** → Noted as a dependency for the scope-requests change: the gateway mints a grant scoped to the same table, `where` and the pupil column.
 - **[Results change from rows to pupils]** → Documented in the tool's gateway notes and the worked example. Nobody relied on row semantics; the eval doesn't check values.
 - **[Manifest-driven levels]** → An unlisted column counts as 4, so a new column can't slip through as low-level.
