@@ -56,6 +56,11 @@ gateway = [
     "pyjwt>=2.9.0",
     "cryptography>=42",
     "litellm>=1.95",
+    "psycopg[binary,pool]>=3.2",
+    "opentelemetry-sdk>=1.30",
+    "opentelemetry-exporter-otlp-proto-http>=1.30",
+    "opentelemetry-instrumentation-fastapi>=0.51b0",
+    "opentelemetry-instrumentation-httpx>=0.51b0",
 ]
 synth = [
     "pandas>=2.2",

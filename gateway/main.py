@@ -17,6 +17,7 @@ from fastmcp.exceptions import ToolError
 from pydantic import BaseModel
 
 from gateway.cli import sign_request
+from gateway.lib import db, telemetry
 from gateway.lib.common import generate_keypair, pub_to_jwk
 from gateway.lib.gateway_verify import Gateway, Request
 from gateway.lib.interfaces import SERVER_LEVELS
@@ -51,10 +52,14 @@ def load_state(state_dir: Path) -> None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     load_state(STATE_DIR)
+    await db.open_pool()  # no-op unless GATEWAY_DATABASE_URL is set
     yield
+    await db.close_pool()
 
 
 app = FastAPI(title="mandate gateway", lifespan=lifespan)
+telemetry.setup(app)  # no-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set
+app.include_router(db.router)
 
 
 @app.get("/healthcheck")
@@ -108,6 +113,7 @@ async def tools_call(body: CallBody):
 
     decision = gateway.decide(Request(**body.model_dump()))
     record = decision.to_dict()
+    telemetry.annotate_decision(body.server, body.tool, body.arguments, body.mandate, record)  # keys, never values
     # no audit trail: teams write their own decision record here (e.g. state["dir"] / "audit.jsonl")
 
     if decision.decision == "DENY":

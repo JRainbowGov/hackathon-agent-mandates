@@ -55,7 +55,7 @@ attack_mandates:  ## Day 2: issue the default mandate, and a feature mandate if 
 	done
 
 test:
-	cd mcp_server && uv sync --group dev --extra fastapi --extra synth && uv run python -m pytest --cov=mcp_server -v --cov-report=term-missing --cov-fail-under=0
+	cd mcp_server && uv sync --group dev --extra fastapi --extra gateway --extra synth && uv run python -m pytest --cov=mcp_server -v --cov-report=term-missing --cov-fail-under=0
 	uv run python -m pytest gateway/tests data_slices/tests
 
 .PHONY: lint
@@ -67,6 +67,29 @@ lint:  ## Check code formatting & linting
 format:  ## Format and fix code
 	uv run ruff format .
 	uv run ruff check . --fix
+
+# ---------------------------------------------------------------- dev-only audit store + tracing (docs/dev-scaffold.md)
+OBS_COMPOSE = docker compose -f docker-compose.yaml -f docker-compose.observability.yaml
+
+.PHONY: obs_up obs_down obs_reset db_shell db_shell_gateway trace_ui
+obs_up:  ## Start the stack plus Postgres and Jaeger; the gateway traces to Jaeger
+	cp -n .env.example .env || true
+	$(OBS_COMPOSE) up -d --build --wait
+
+obs_down:  ## Stop the stack and the observability services; keeps the Postgres volume
+	$(OBS_COMPOSE) down
+
+obs_reset:  ## Stop everything and drop the Postgres volume, so db/init runs again on the next obs_up
+	$(OBS_COMPOSE) down --volumes
+
+db_shell:  ## psql into the audit store as the schema owner
+	$(OBS_COMPOSE) exec postgres sh -c 'psql -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"'
+
+db_shell_gateway:  ## psql as the gateway's own role (append-only on audit_events)
+	$(OBS_COMPOSE) exec postgres sh -c 'PGPASSWORD="$$GATEWAY_DB_PASSWORD" psql -h 127.0.0.1 -U "$$GATEWAY_DB_USER" -d "$$POSTGRES_DB"'
+
+trace_ui:  ## Print the Jaeger UI URL
+	@echo "http://127.0.0.1:$${JAEGER_UI_PORT:-16686}/search?service=mandate-gateway"
 
 run_frontend:
 	cd frontend && npm run dev
