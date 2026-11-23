@@ -41,14 +41,17 @@ ceiling (per source, unverified)  ->  decide  ->  ceiling (per agent key)  ->  r
 ### 3. Per-minute windows in memory
 Sliding windows (a deque of timestamps) per `(family, entry)` for `rate.per_minute`, per `agent_id` for the key ceiling, and per source address for failed verifications. They're lost on restart, which only ever loosens them for one minute.
 
-### 4. Ceiling defaults
-`GATEWAY_KEY_CEILING_PER_MIN=300`, `GATEWAY_UNVERIFIED_PER_MIN=120`.
+### 4. Limits come from a config file
+`gateway/config/limits.yaml` holds `ceilings` (`per_key_per_minute` 300, `unverified_per_source_per_minute` 120, `record_per_second` 1, `retry_after_seconds` 60), `budgets` (`default_distinct_pupils` and `default_calls`, both `null`) and `alerts` (thresholds below). `GATEWAY_LIMITS_CONFIG` names another file, and `GATEWAY_LIMIT_<SECTION>_<KEY>` overrides one value. Unknown keys, wrong types or a missing named file stop the gateway at startup rather than run with guessed limits. `/describe` publishes the values, which carry nothing secret and help agents pace themselves.
+- *Alternative:* plain environment variables only. Rejected: the access-config workstream is moving policy into YAML, and a file is reviewable in a PR.
+
+Defaults:
 - One eval run is about 32 calls in a few seconds. The Codex review measured that, and noted the ceiling must sit "well above" it.
 - A hackathon agent loop rarely exceeds a few calls a second.
 - Both settings are environment variables, so the deployment can set them.
 
 ### 5. Alerts are audit events
-- `audit.py` gains an event type `alert`, added to the SQLite `event_type` check and to a new `record_alert(jti, principal, reason_code, pupil_id=None)`. Alerts join the hash chain, so they're tamper-evident, and `audit.events` shows them with no new read path.
+- `audit.py` gains an event type `alert`, added to the SQLite `event_type` check (with the migration in Risks) and to a new `record_alert(jti, principal, reason_code, event_id, pupil_id=None)`. Alerts join the hash chain, so they're tamper-evident, and `audit.events` shows them with no new read path.
 - **Dedupe** uses a deterministic event UUID, `uuid5(jti + reason)`, or `uuid5(pupil + hour)` for targeting. That reuses the idempotent `decision_id` from the issuer-event change, so repeats cost nothing.
 - **Pupil targeting** is a store query: distinct `jti` per pupil in the last hour, via `json_each`. It's only for pupils in the current result.
 - *Alternative:* log lines only. Rejected: the person can't see logs (question 16), and the "Unseen" bonus needs the gateway's own records.
@@ -63,12 +66,12 @@ Sliding windows (a deque of timestamps) per `(family, entry)` for `rate.per_minu
 - **[A budget check that fails open would release data]** → Any error counting pupils or reading the store withholds the result with `503 AUDIT_UNAVAILABLE`, the same path as a failed audit write.
 - **[Alert thresholds can be gamed by staying under them]** → They're signals, not controls. Mandates that need a hard limit carry `budget`. The thresholds are documented, so they're honest about what they catch.
 - **[Poisoning `ALERT_PUPIL_TARGETED`]** → Attackers can make a pupil look targeted, but alerts never refuse, so question 0's P0004 stays allowed.
-- **[The schema change needs a fresh audit file]** → It's a hackathon store; `docker compose down -v` recreates it. Noted in the docs.
+- **[The schema change on an existing audit file]** → Migrated on open. Optional columns are added. A file whose `event_type` check predates `alert` is rebuilt row by row in a transaction, keeping every hash and signature, so `audit verify` still passes.
 - **[`json_each` scans grow with the audit log]** → They're indexed by `family_jti` and the hour. The volume is small for a hackathon.
 - **[Child mandates from other issuers]** → The family key is trusted only from a verified mandate's `parent.jti`; no cross-issuer chains.
 
 ## Migration Plan
 
 1. Land after `add-audit-trail` (on `ihor`).
-2. Recreate any dev audit file. Compose deployments start fresh.
-3. Rollback: set both ceilings very high and revert. Mandates without `budget` were never refused, so nothing else changes.
+2. Existing audit files migrate on open; nothing to recreate.
+3. Rollback: set the ceilings to 0 (off) and revert. Mandates without `budget` were never refused, so nothing else changes.

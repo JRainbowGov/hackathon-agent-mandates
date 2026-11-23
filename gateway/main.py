@@ -22,9 +22,9 @@ from fastmcp.exceptions import ToolError
 from pydantic import BaseModel
 
 from gateway.cli import sign_request
-from gateway.lib import audit, safe_counts
+from gateway.lib import audit, budgets, safe_counts
 from gateway.lib.common import generate_keypair, pub_to_jwk
-from gateway.lib.gateway_verify import Gateway, Request
+from gateway.lib.gateway_verify import AuditContext, Gateway, Request
 from gateway.lib.interfaces import SERVER_LEVELS
 from gateway.lib.status_list import is_revoked
 from gateway.lib.trust_registry import TrustedList
@@ -61,6 +61,7 @@ def load_state(state_dir: Path) -> None:
     state["gateway"] = Gateway(registry, status_lists={})
     state["status_uri"] = json.loads((state_dir / "status_list.json").read_text())["uri"]
     state["dir"] = state_dir
+    state["limits"] = budgets.State(budgets.load_limits())  # fails startup on an invalid limits file
 
 
 @asynccontextmanager
@@ -102,6 +103,8 @@ async def describe() -> dict:
         # data level per server (1 public .. 4 special category); a mandate's clearance must cover it
         "server_levels": {name: SERVER_LEVELS.get(name) for name in servers},
         "step_up_patterns": state["gateway"].step_up,
+        # gateway-wide run limits (gateway/config/limits.yaml); a mandate's own budget and rate claims apply on top
+        "limits": state["limits"].limits.public(),
         "signing": {
             "alg": "Ed25519 by the key in the mandate's cnf.jwk; sig is base64url without padding",
             "signing_input": "canonical JSON (sorted keys, separators ',' and ':', ensure_ascii=False) of "
@@ -167,25 +170,118 @@ async def _forward(body: CallBody, k: int = safe_counts.DEFAULT_K):
     return 200, result.data, None
 
 
+def _deny(decision, code: str, detail: str):
+    return replace(decision, decision="DENY", reason_code=code, detail=detail)
+
+
+def _response(record: dict, status: int, data, error: str | None, limits: budgets.Limits):
+    if status == HTTPStatus.NOT_FOUND:
+        raise HTTPException(404, error)
+    if error is not None:
+        return JSONResponse({"decision": record, "error": error}, status_code=status)
+    if status != HTTPStatus.OK:
+        headers = {"Retry-After": str(limits.retry_after_seconds)} if record["reason_code"] == "RATE_LIMITED" else None
+        return JSONResponse({"decision": record}, status_code=status, headers=headers)
+    return {"decision": record, "result": data}
+
+
+STATUS_FOR = {"ALLOW": HTTPStatus.OK, "STEP_UP": HTTPStatus.ACCEPTED, "DENY": HTTPStatus.FORBIDDEN}
+TOO_MANY = {"RATE_LIMITED", "BUDGET_EXHAUSTED"}
+
+
 @app.post("/tools/call")
 async def tools_call(body: CallBody, http: HTTPRequest = None):  # None when called in-process (demo)
     gateway: Gateway = state["gateway"]
+    limits: budgets.State = state["limits"]
+    source = _source_addr(http)
     # re-read the published status list each request so `cli revoke` applies without a restart
     gateway.status_lists[state["status_uri"]] = (state["dir"] / "status_list.jwt").read_text().strip()
 
+    # a flood of unverifiable requests is refused before any signature work (add-run-budgets)
+    if budgets.source_over_ceiling(limits, source or "unknown"):
+        record = {"decision": "DENY", "reason_code": "RATE_LIMITED", "detail": "unverified requests from this source",
+                  "decision_id": str(uuid.uuid4())}  # fmt: skip
+        if limits.should_record(f"source:{source}"):
+            await _record_or_log(record, AuditContext(), body, source=source, status=HTTPStatus.TOO_MANY_REQUESTS)
+        return _response(record, HTTPStatus.TOO_MANY_REQUESTS, None, None, limits.limits)
+
+    decision, ctx, plan, counts = _decide(gateway, limits, body, source)
+    if decision.decision != "ALLOW" or plan is None:
+        return await _refused(limits, decision, ctx, plan, body, source=source)
+    return await _allowed(limits, decision, ctx, plan, body, source=source, counts=counts)
+
+
+def _decide(gateway: Gateway, limits: budgets.State, body: CallBody, source: str | None):
+    """Mandate, signature, scope, then the gateway's own refusals: budget claims, key ceiling, safe counts."""
     decision, ctx = gateway.decide_with_context(Request(**body.model_dump()))
+    plan = None
+    if not ctx.identity_verified:
+        limits.unverified.add(source or "unknown")
+    else:
+        try:
+            plan = budgets.plan_for(limits, ctx.claims, body.server, body.tool, body.arguments)
+        except budgets.BudgetInvalid as e:
+            decision = _deny(decision, "BUDGET_INVALID", str(e))
+        if budgets.key_over_ceiling(limits, ctx.claims.get("agent_id")):
+            decision = _deny(decision, "RATE_LIMITED", "agent key ceiling")
     counts = decision.decision == "ALLOW" and safe_counts.applies(body.server, body.tool)
     if counts and (refused := safe_counts.check(body.arguments, ctx.claims)):
-        decision = replace(decision, decision="DENY", reason_code=refused[0], detail=refused[1])
+        decision = _deny(decision, *refused)
+    return decision, ctx, plan, counts
+
+
+async def _refused(limits: budgets.State, decision, ctx, plan, body: CallBody, *, source: str | None):
     record = {**decision.to_dict(), "decision_id": str(uuid.uuid4())}
+    status = HTTPStatus.TOO_MANY_REQUESTS if record["reason_code"] in TOO_MANY else STATUS_FOR[decision.decision]
+    ceiling = record["reason_code"] == "RATE_LIMITED"
+    caller = f"key:{ctx.claims.get('agent_id')}" if ctx.claims else f"source:{source}"
+    if not ceiling or limits.should_record(caller):  # while a ceiling holds, record sparingly
+        await _record_or_log(record, ctx, body, source=source, status=status, plan=plan)
+    if plan is not None and not ceiling:
+        await _alerts(limits, plan, ctx.claims, [])
+    return _response(record, status, None, None, limits.limits)
 
-    if decision.decision == "ALLOW":
-        status, data, error = await _forward(body, safe_counts.k_for(ctx.claims))
-    else:
-        status, data, error = (403 if decision.decision == "DENY" else 202), None, None
-    min_level = safe_counts.max_level(body.arguments) if counts else None
-    summary = audit.summarise(data, body.server, min_level=min_level) if status == HTTPStatus.OK else None
 
+async def _allowed(limits: budgets.State, decision, ctx, plan, body: CallBody, *, source: str | None, counts: bool):
+    # assigned before forwarding: the scope-requests change uses it as the tool grant's jti
+    decision_id = str(uuid.uuid4())
+    async with limits.lock(plan.family):  # check, forward, count and record as one step per budget family
+        if refused := await budgets.before_forward(limits, plan):
+            decision = _deny(decision, *refused)
+            status, data, error = HTTPStatus.TOO_MANY_REQUESTS, None, None
+        else:
+            status, data, error = await _forward(body, safe_counts.k_for(ctx.claims))
+        min_level = safe_counts.max_level(body.arguments) if counts else None
+        summary = audit.summarise(data, body.server, min_level=min_level) if status == HTTPStatus.OK else None
+        if summary is not None and (over := await _pupil_budget(limits, plan, summary)):
+            decision, data, summary = _deny(decision, *over), None, None  # withhold the whole result
+            status = HTTPStatus.SERVICE_UNAVAILABLE if over[0] == "AUDIT_UNAVAILABLE" else HTTPStatus.TOO_MANY_REQUESTS
+        record = {**decision.to_dict(), "decision_id": decision_id}
+        try:
+            await audit.record(decision=record, ctx=ctx, server=body.server, tool=body.tool, arguments=body.arguments,
+                               source_addr=source, http_status=status, summary=summary,
+                               scope_entry=plan.entry)  # fmt: skip
+        except audit.AuditUnavailable:
+            log.exception("audit event not written for decision %s", record["decision_id"])
+            if status == HTTPStatus.OK:  # nothing leaves the gateway without its record
+                withheld = {**record, "decision": "DENY", "reason_code": "AUDIT_UNAVAILABLE", "detail": ""}
+                return JSONResponse({"decision": withheld}, status_code=503)
+        if status == HTTPStatus.OK:
+            budgets.after_allowed(limits, plan)
+    await _alerts(limits, plan, ctx.claims, summary.pupil_ids if summary else [])
+    return _response(record, status, data, error, limits.limits)
+
+
+async def _pupil_budget(limits: budgets.State, plan, summary) -> tuple[str, str] | None:
+    try:
+        return await budgets.over_pupil_budget(limits, plan, summary.pupil_ids)
+    except Exception:  # counting failed: fail closed, nothing leaves
+        log.exception("pupil budget check failed")
+        return "AUDIT_UNAVAILABLE", ""
+
+
+async def _record_or_log(record, ctx, body: CallBody, *, source, status, plan=None) -> None:
+    """Record a refusal. A refusal is returned even if its event can't be written."""
     try:
         await audit.record(
             decision=record,
@@ -193,23 +289,20 @@ async def tools_call(body: CallBody, http: HTTPRequest = None):  # None when cal
             server=body.server,
             tool=body.tool,
             arguments=body.arguments,
-            source_addr=_source_addr(http),
+            source_addr=source,
             http_status=status,
-            summary=summary,
+            scope_entry=plan.entry if plan else None,
         )
     except audit.AuditUnavailable:
-        log.exception("audit event not written for decision %s", record["decision_id"])
-        if status == HTTPStatus.OK:  # nothing leaves the gateway without its record
-            withheld = {**record, "decision": "DENY", "reason_code": "AUDIT_UNAVAILABLE", "detail": ""}
-            return JSONResponse({"decision": withheld}, status_code=503)
+        log.exception("audit event not written for refusal %s", record["decision_id"])
 
-    if status == HTTPStatus.NOT_FOUND:
-        raise HTTPException(404, error)
-    if error is not None:
-        return JSONResponse({"decision": record, "error": error}, status_code=status)
-    if status != HTTPStatus.OK:
-        return JSONResponse({"decision": record}, status_code=status)
-    return {"decision": record, "result": data}
+
+async def _alerts(limits: budgets.State, plan, claims: dict, pupils: list[str]) -> None:
+    """Alerts never change a response, and a failure to raise one is only logged."""
+    try:
+        await budgets.raise_alerts(limits, plan, claims, pupils)
+    except Exception:
+        log.exception("alert not recorded")
 
 
 class ExternalEventBody(BaseModel):

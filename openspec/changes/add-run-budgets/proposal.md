@@ -10,6 +10,7 @@ Every call is judged on its own, so an agent that walks Elmwood's Year 11s one p
 - **Distinct pupils are counted before release.** For an allowed call the gateway holds the result, counts the pupils in it that the mandate hasn't seen, and withholds the whole result with `429 BUDGET_EXHAUSTED` if the total would pass the budget. Nothing over budget leaves.
 - **A budget covers a mandate and its children.** A supplementary mandate (`parent.jti`, from the scope-requests change) draws on its parent's budget, so asking for more access doesn't reset the count.
 - **A gateway ceiling for every caller.** Calls per agent key per minute, and requests per source address per minute for requests that never verify. Over the ceiling: `429 RATE_LIMITED`. Defaults sit well above a full eval run.
+- **Configurable.** Ceilings, alert thresholds and an optional default budget for mandates without claims live in `gateway/config/limits.yaml`, each overridable by a `GATEWAY_LIMIT_<SECTION>_<KEY>` environment variable, validated at startup and shown by `/describe`. The default budget ships as `null` (none), so the eval and Day 2 default mandate are unaffected.
 - **Alerts for mandates without budget claims.** Those mandates are never refused by history (D3). Instead the gateway records an `alert` event in the audit trail when:
   - a mandate is refused 5 times in a row;
   - one mandate has received more than 200 distinct pupils;
@@ -39,5 +40,7 @@ None. Mandates without the new claims keep their decisions; the only new refusal
   - `gateway/main.py`: the ceiling before deciding; the budget check between forwarding and recording.
   - `gateway/lib/audit.py`: an `alert` event type, distinct pupils per mandate family, and pupils returned per pupil across mandates.
 - **Responses:** `429` with reasons `RATE_LIMITED` and `BUDGET_EXHAUSTED`, inside the existing `decision` object. The request shape is unchanged.
-- **Storage:** the SQLite schema's `event_type` check gains `alert`, so an existing dev audit file must be recreated (`docker compose down -v`).
+- **Storage:** the SQLite schema's `event_type` check gains `alert`, and events gain optional `family_jti` and `scope_entry`. An existing audit file is migrated on open: new columns are added, and a file whose check predates `alert` is rebuilt row by row, so its events and chain are unchanged.
+- **Config:** `gateway/config/limits.yaml` (new), and `pyyaml` added to the gateway extra.
+- **For the scope-requests change:** the issuer must copy the parent's `budget` claim into supplementary mandates.
 - **Questions:** 11, and inputs for 16 (alerts show misuse). Day 2: Bulk, Crash, and the "Unseen" bonus.

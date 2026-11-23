@@ -67,7 +67,13 @@ FIELDS = (
 ARRAY_FIELDS = ("arg_keys", "pupil_ids_returned", "columns_returned")
 # Fields added after events were already being chained. They are hashed only when set, so every event stored before
 # a field existed still verifies unchanged.
-OPTIONAL_FIELDS = ("minted_jti",)  # approval_granted: the supplementary mandate the approval produced
+OPTIONAL_FIELDS = (
+    "minted_jti",  # approval_granted: the supplementary mandate the approval produced
+    "family_jti",  # the mandate's parent jti, or its own: whose budget a call draws on (add-run-budgets)
+    "scope_entry",  # index of the scope entry that allowed the call, for per-entry limits
+)
+ALERT_EVENT = "alert"
+EVENT_TYPES = ("decision", *APPROVAL_EVENTS, ALERT_EVENT)
 
 
 class AuditUnavailable(Exception):
@@ -214,6 +220,12 @@ def _matches(event: dict, principal: str | None, jti: str | None) -> bool:
     return (principal is None or event["principal"] == principal) and (jti is None or event["jti"] == jti)
 
 
+def _in_family(event: dict, family: str) -> bool:
+    """Events of a family: tagged with it, or (events from before family_jti existed) the mandate itself."""
+    tagged = event.get("family_jti")
+    return tagged == family if tagged is not None else event["jti"] == family
+
+
 def _in_range(event: dict, since: str | None, until: str | None) -> bool:
     ts = norm_ts(event["ts"])
     return (since is None or ts >= norm_ts(since)) and (until is None or ts <= norm_ts(until))
@@ -253,6 +265,13 @@ class MemoryStore:
     async def verified_matching(self, principal: str | None, jti: str | None) -> list[dict]:
         return [e for e in self._events if e["identity_verified"] and _matches(e, principal, jti)]
 
+    async def family_events(self, family: str) -> list[dict]:
+        return [e for e in self._events if e["identity_verified"] and _in_family(e, family)]
+
+    async def pupil_events_since(self, pupil: str, since: str) -> list[dict]:
+        return [e for e in self._events if e["identity_verified"] and pupil in e["pupil_ids_returned"]
+                and norm_ts(e["ts"]) >= since]  # fmt: skip
+
 
 SQLITE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY, note TEXT NOT NULL);
@@ -263,7 +282,7 @@ CREATE TABLE IF NOT EXISTS audit_events (
     decision_id        TEXT NOT NULL UNIQUE,
     ts                 TEXT NOT NULL,
     event_type         TEXT NOT NULL CHECK (event_type IN ('decision', 'approval_requested', 'approval_granted',
-                                                           'approval_denied', 'approval_expired')),
+                                                           'approval_denied', 'approval_expired', 'alert')),
     identity_verified  INTEGER NOT NULL CHECK (identity_verified IN (0, 1)),
     jti TEXT, agent_id TEXT, iss TEXT, issuer_kid TEXT, status_idx INTEGER, principal TEXT, parent_jti TEXT,
     server             TEXT NOT NULL,
@@ -278,7 +297,7 @@ CREATE TABLE IF NOT EXISTS audit_events (
     pupil_ids_returned TEXT NOT NULL,  -- JSON array
     columns_returned   TEXT NOT NULL,  -- JSON array
     max_pii_level      INTEGER CHECK (max_pii_level IS NULL OR max_pii_level BETWEEN 1 AND 4),
-    result_hash TEXT, ref_decision_id TEXT, minted_jti TEXT,
+    result_hash TEXT, ref_decision_id TEXT, minted_jti TEXT, family_jti TEXT, scope_entry TEXT,
     prev_hash          TEXT NOT NULL UNIQUE,  -- each event can be extended once: the chain can't fork
     event_hash         TEXT NOT NULL UNIQUE,
     sig                TEXT NOT NULL,
@@ -286,6 +305,8 @@ CREATE TABLE IF NOT EXISTS audit_events (
 );
 CREATE INDEX IF NOT EXISTS audit_events_jti ON audit_events (jti, seq);
 CREATE INDEX IF NOT EXISTS audit_events_principal ON audit_events (principal, seq);
+CREATE INDEX IF NOT EXISTS audit_events_family ON audit_events (family_jti, seq);
+CREATE INDEX IF NOT EXISTS audit_events_ts ON audit_events (ts);
 
 -- Append-only for every connection, short of dropping the trigger (which the anchors would then expose).
 CREATE TRIGGER IF NOT EXISTS audit_events_no_update BEFORE UPDATE ON audit_events
@@ -316,13 +337,50 @@ class SqliteStore:
             self._conn = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None)
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA synchronous=FULL")  # an acknowledged event survives a crash
-            self._conn.executescript(SQLITE_SCHEMA)
-            existing = {r[1] for r in self._conn.execute("PRAGMA table_info(audit_events)")}
-            for column in OPTIONAL_FIELDS:  # a file created before the field existed gains the column
-                if column not in existing:
-                    self._conn.execute(f"ALTER TABLE audit_events ADD COLUMN {column} TEXT")
+            self._migrate()
         self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.row_factory = sqlite3.Row
+
+    def _migrate(self) -> None:
+        """Create the schema, or bring a file made by an earlier version up to it without changing any event.
+
+        - Optional columns added later are added with ALTER TABLE.
+        - The event-type check can't be altered in SQLite, so a file whose check predates `alert` is rebuilt:
+          the table is copied row by row into the current schema, in one transaction. Hashes and signatures are
+          unchanged, so the chain still verifies.
+        """
+        conn = self._conn
+        table_sql = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='audit_events'").fetchone()
+        if table_sql and "'alert'" not in table_sql[0]:
+            old_cols = [r[1] for r in conn.execute("PRAGMA table_info(audit_events)")]
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                for name in ("audit_events_no_update", "audit_events_no_delete"):
+                    conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+                conn.execute("ALTER TABLE audit_events RENAME TO audit_events_before_alerts")
+                for row in conn.execute("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name="
+                                        "'audit_events_before_alerts' AND name LIKE 'audit_events_%'").fetchall():
+                    conn.execute(f"DROP INDEX IF EXISTS {row[0]}")
+                conn.execute("COMMIT")
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
+            conn.executescript(SQLITE_SCHEMA)
+            cols = ", ".join(c for c in old_cols if c in COLUMNS)
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                conn.execute(f"INSERT INTO audit_events ({cols}) SELECT {cols} FROM audit_events_before_alerts")  # noqa: S608
+                conn.execute("DROP TABLE audit_events_before_alerts")
+                conn.execute("COMMIT")
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
+        conn.executescript(SQLITE_SCHEMA.split("CREATE INDEX")[0])  # tables first, for a fresh file
+        existing = {r[1] for r in conn.execute("PRAGMA table_info(audit_events)")}
+        for column in OPTIONAL_FIELDS:  # a file created before the field existed gains the column
+            if column not in existing:
+                conn.execute(f"ALTER TABLE audit_events ADD COLUMN {column} TEXT")
+        conn.executescript(SQLITE_SCHEMA)  # indexes and triggers, now that every column exists
 
     def close(self) -> None:
         self._conn.close()
@@ -403,6 +461,16 @@ class SqliteStore:
             params.append(jti)
         return await self._select("WHERE " + " AND ".join(clauses), tuple(params))
 
+    async def family_events(self, family: str) -> list[dict]:
+        rows = await self._select("WHERE identity_verified = 1 AND (family_jti = ? OR jti = ?)", (family, family))
+        return [e for e in rows if _in_family(e, family)]
+
+    async def pupil_events_since(self, pupil: str, since: str) -> list[dict]:
+        rows = await self._select(
+            "WHERE identity_verified = 1 AND ts >= ? AND pupil_ids_returned LIKE ?", (since, f'%"{pupil}"%')
+        )
+        return [e for e in rows if pupil in e["pupil_ids_returned"]]
+
 
 AUDIT_DB_ENV = "GATEWAY_AUDIT_DB"
 _store: MemoryStore | SqliteStore | None = None
@@ -463,6 +531,7 @@ async def record(
     source_addr: str | None,
     http_status: int,
     summary: Summary | None = None,
+    scope_entry: int | None = None,
 ) -> dict:
     """Write the one event for a tools/call. `decision` is Decision.to_dict() plus decision_id."""
     claims = ctx.claims if ctx.identity_verified else None
@@ -497,6 +566,8 @@ async def record(
         "max_pii_level": summary.max_pii_level if summary else None,
         "result_hash": summary.result_hash if summary else None,
         "ref_decision_id": None,
+        "family_jti": (_parent_jti(claims) or claims["jti"]) if claims else None,
+        "scope_entry": scope_entry,
     }
     try:
         return await get_store().append(event)
@@ -550,6 +621,42 @@ async def record_external(
         minted_jti=minted_jti,
     )
     return await store.append(event)
+
+
+async def record_alert(*, jti: str, principal: str | None, reason_code: str, event_id: str,
+                       pupil_id: str | None = None, agent_id: str | None = None) -> dict:
+    """A gateway alert about a verified mandate, in the same chain. Recorded once per event_id."""
+    store = get_store()
+    decision_id = str(uuid.UUID(event_id))
+    if existing := await store.by_decision_id(decision_id):
+        return existing
+    event = dict.fromkeys(FIELDS)
+    event.update(
+        decision_id=decision_id, ts=now_iso(), event_type=ALERT_EVENT, identity_verified=True, jti=jti,
+        agent_id=agent_id, principal=principal, server="gateway", tool="alert", arg_keys=[],
+        arg_hash=sha256_hex(b"{}"), reason_code=reason_code, scope_pupil_id=pupil_id,
+    )  # fmt: skip
+    return await store.append(event)
+
+
+async def family_pupils(family: str) -> set[str]:
+    """Distinct pupils the family's allowed calls received."""
+    events = await get_store().family_events(family)
+    return {p for e in events if e["event_type"] == "decision" for p in e["pupil_ids_returned"]}
+
+
+async def family_allowed_calls(family: str, scope_entry: int | None = None) -> int:
+    events = await get_store().family_events(family)
+    return sum(
+        e["event_type"] == "decision" and e["decision"] == "ALLOW"
+        and (scope_entry is None or e.get("scope_entry") == str(scope_entry))
+        for e in events
+    )  # fmt: skip
+
+
+async def mandates_for_pupil_since(pupil: str, since: str) -> set[str]:
+    events = await get_store().pupil_events_since(pupil, norm_ts(since))
+    return {e["jti"] for e in events if e["event_type"] == "decision"}
 
 
 # ---------------------------------------------------------------- events signed by the issuer service
@@ -679,6 +786,7 @@ def _public(e: dict) -> dict:
         "source_addr": e["source_addr"], "server": e["server"], "tool": e["tool"], "arg_keys": e["arg_keys"],
         "decision": e["decision"], "reason_code": e["reason_code"], "ref_decision_id": e["ref_decision_id"],
         "minted_jti": e.get("minted_jti"),
+        **({"pupil_id": e["scope_pupil_id"]} if e["event_type"] == ALERT_EVENT else {}),
     }  # fmt: skip
 
 

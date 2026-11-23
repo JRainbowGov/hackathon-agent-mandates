@@ -128,6 +128,21 @@
               "type": "array",
               "items": {}
             }
+          },
+          "rate": {
+            "type": "object",
+            "description": "Per scope entry: per_minute (429 RATE_LIMITED) and max_calls (429 BUDGET_EXHAUSTED).",
+            "properties": {
+              "per_minute": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "max_calls": {
+                "type": "integer",
+                "minimum": 1
+              }
+            },
+            "additionalProperties": false
           }
         }
       },
@@ -175,6 +190,21 @@
           "description": "Minimum pupils per released group; values below the default 10 are ignored."
         }
       }
+    },
+    "budget": {
+      "type": "object",
+      "description": "Run budget across the mandate's life and its supplementary mandates (docs/run-budgets.md). Over it: 429 BUDGET_EXHAUSTED. Issuers copy it into supplementary mandates.",
+      "properties": {
+        "distinct_pupils": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "calls": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
     }
   }
 }
