@@ -511,6 +511,7 @@ def sign_event(event: dict) -> str:
         principal=approver.get("id") if person else r["principal"],
         agent_id=approver.get("id") if approver and not person else r["requester_agent_id"],
         event_id=event["id"],
+        minted_jti=event.get("minted_jti"),  # approval_granted: the supplementary mandate it produced
         ttl=86400,  # the outbox may retry for up to a day
     )
 

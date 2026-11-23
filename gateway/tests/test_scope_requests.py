@@ -242,6 +242,8 @@ def test_person_flow_end_to_end(flow):
     kinds = [e["event_type"] for e in events(pclaims["jti"])]
     assert "approval_requested" in kinds
     assert "approval_granted" in kinds
+    (granted,) = [e for e in events(pclaims["jti"]) if e["event_type"] == "approval_granted"]
+    assert granted["minted_jti"] == claims["jti"]
 
 
 def test_parent_revoked(flow):
@@ -491,3 +493,17 @@ def test_ceiling_rechecked_at_approval(flow):
     r = f["decide"](v["request_id"], v["user_code"], session=f["login"]())
     assert (r.status_code, r.json()["error"]) == (403, "EXCEEDS_PRINCIPAL")
     assert f["ic"].get(f"/requests/{v['request_id']}/view").json()["status"] == "pending"
+
+
+def test_check_gives_the_safe_counts_answer(flow):
+    f = flow
+    scope = [{"server": "pupil-data", "tools": ["aggregate"],
+              "constraints": {"table": ["personal_data_school_census"]}}]  # fmt: skip
+    token = f["mandate"](scope, clearance=4)
+    arguments = {"table": "personal_data_school_census", "group_by": ["Psuedo ID"], "measure": "InCareAtCurrentSchool"}
+    _, checked = f["call"](f["client"], token, "grants", "check",
+                           args={"server": "pupil-data", "tool": "aggregate", "arguments": arguments})  # fmt: skip
+    status, real = f["call"](f["client"], token, "pupil-data", "aggregate", args=arguments)
+    assert status == 403
+    assert checked["result"]["reason_code"] == real["decision"]["reason_code"]
+    assert checked["result"]["decision"] == "DENY"

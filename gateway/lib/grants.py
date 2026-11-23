@@ -20,7 +20,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 
-from . import audit
+from . import audit, safe_counts
 from .audience import audience_pupils
 from .common import canonical, sha256_hex
 from .grant_words import grants_words, until
@@ -139,6 +139,9 @@ def _check(claims: dict, arguments: dict, step_up: list[str]) -> Outcome:
         return refused("REQUEST_INVALID", "check needs server, tool and arguments")
     hypothetical = Request(server=server, tool=tool, arguments=args, mandate="", nonce="", ts=0, sig="")
     decision, code, detail = check_request(hypothetical, claims["scope"], claims["deny"], step_up, claims)
+    # the same safe-counts refusal the real call would get (add-safe-counts)
+    if decision == "ALLOW" and safe_counts.applies(server, tool) and (counted := safe_counts.check(args, claims)):
+        decision, code, detail = "DENY", counted[0], counted[1]
     data = {"decision": decision, "reason_code": code, "detail": detail}
     if decision == "STEP_UP" or code in {
         "OUT_OF_SCOPE", "CONSTRAINT_VIOLATED", "CONSTRAINT_MISSING", "CLEARANCE_TOO_LOW", "AUDIENCE_VIOLATED",
