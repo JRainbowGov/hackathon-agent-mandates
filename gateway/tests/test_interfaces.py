@@ -188,7 +188,9 @@ def test_special_refused_below_clearance_4(gw):
 def test_describe_shows_levels(gw):
     client, _, _ = gw
     desc = client.get("/describe").json()
-    assert desc["server_levels"] == {"pupil-data": 4, "schools": 1, "directory": 2, "special": 4, "audit": 2}
+    assert desc["server_levels"] == {
+        "pupil-data": 4, "schools": 1, "directory": 2, "special": 4, "audit": 2, "grants": 1,
+    }  # fmt: skip
     assert set(desc["servers"]) == set(SERVER_LEVELS)
     assert "special.*" in desc["step_up_patterns"]
 

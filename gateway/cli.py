@@ -23,6 +23,7 @@ import os
 import secrets
 import sys
 import time
+import urllib.error
 import urllib.request
 from http import HTTPStatus
 from pathlib import Path
@@ -205,6 +206,81 @@ def cmd_keygen(a) -> None:
     print(json.dumps(pub_to_jwk(priv.public_key())))
 
 
+# ---------------------------------------------------------------- approvers (add-scope-requests)
+
+APPROVER_LOGIN_TYP = "approver-login+jwt"
+APPROVER_DECISION_TYP = "approver-decision+jwt"
+
+
+def register_approver(state: Path, principal: str, pub) -> None:
+    """Add a person's approver public key to the issuer's approvers.json."""
+    path = state / "approvers.json"
+    approvers = json.loads(path.read_text()) if path.exists() else {}
+    approvers[principal] = pub_to_jwk(pub)
+    path.write_text(json.dumps(approvers, indent=2))
+
+
+def login_token(priv, principal: str, ttl: int = 300) -> str:
+    """A one-time login token for the approval page, signed with the person's approver key."""
+    import jwt  # noqa: PLC0415
+
+    now = int(time.time())
+    claims = {"sub": principal, "jti": secrets.token_urlsafe(16), "iat": now, "exp": now + ttl}
+    return jwt.encode(claims, priv_to_pem(priv), algorithm="EdDSA", headers={"typ": APPROVER_LOGIN_TYP})
+
+
+def decision_token(priv, principal: str, request_id: str, decision: str, approved: dict | None = None) -> str:
+    """A person's decision on a scope request, signed with their approver key (single use)."""
+    import jwt  # noqa: PLC0415
+
+    from gateway.lib.common import canonical, sha256_hex  # noqa: PLC0415
+
+    now = int(time.time())
+    claims = {
+        "sub": principal,
+        "request_id": request_id,
+        "decision": decision,
+        "approved_hash": sha256_hex(canonical(approved)),
+        "jti": secrets.token_urlsafe(16),
+        "iat": now,
+        "exp": now + 300,
+    }
+    return jwt.encode(claims, priv_to_pem(priv), algorithm="EdDSA", headers={"typ": APPROVER_DECISION_TYP})
+
+
+def cmd_approver_keygen(a) -> None:
+    if a.out.exists():
+        sys.exit(f"{a.out} already exists")
+    priv = load_or_create_key(a.out)
+    register_approver(a.state, a.principal, priv.public_key())
+    print(f"approver key for {a.principal} written to {a.out}; public half registered in {a.state / 'approvers.json'}")
+
+
+def cmd_approver_login(a) -> None:
+    token = login_token(priv_from_pem(a.approver_key.read_bytes()), a.principal)
+    target = f"/approve/{a.request}" if a.request else "/approve"
+    print(f"{a.ui}/approve/login?token={token}&next={target}")
+
+
+def cmd_approve(a) -> None:
+    decision = "reject" if a.reject else "approve"
+    approved = json.loads(a.approved) if a.approved else None
+    signed = decision_token(priv_from_pem(a.approver_key.read_bytes()), a.principal, a.request_id, decision, approved)
+    body = {"decision": decision, "user_code": a.user_code, "approved": approved, "signed": signed}
+    req = urllib.request.Request(  # noqa: S310
+        f"{a.url}/requests/{a.request_id}/decision",
+        data=json.dumps(body).encode(),
+        headers={"content-type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req) as resp:  # noqa: S310
+            status, text = resp.status, resp.read().decode()
+    except urllib.error.HTTPError as e:
+        status, text = e.code, e.read().decode()
+    print(status)
+    print(json.dumps(json.loads(text), indent=2))
+
+
 def cmd_grant_key(a) -> None:
     ensure_keypair(a.state / "tool_grant_key.pem", a.state / "tool_grant.pub")
     print(f"tool grant key ready: {a.state / 'tool_grant.pub'}")
@@ -344,7 +420,7 @@ def _add_audit_parsers(sub) -> None:
         t.set_defaults(fn=fn)
 
 
-def main(argv: list[str] | None = None) -> None:
+def main(argv: list[str] | None = None) -> None:  # noqa: PLR0915  (one parser per subcommand)
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument(
         "--state",
@@ -363,6 +439,28 @@ def main(argv: list[str] | None = None) -> None:
     s = sub.add_parser("keygen", help="make an agent key; prints the public half for the issuer")
     s.add_argument("-o", "--out", type=Path, default=Path("agent.pem"), help="where to save the private key")
     s.set_defaults(fn=cmd_keygen)
+
+    s = sub.add_parser("approver-keygen", help="make a person's approver key and register it with the issuer")
+    s.add_argument("--principal", required=True, help="the person, e.g. officer:jsmith")
+    s.add_argument("-o", "--out", type=Path, required=True, help="where to save the private approver key")
+    s.set_defaults(fn=cmd_approver_keygen)
+
+    s = sub.add_parser("approver-login", help="print a one-time login link for the approval page")
+    s.add_argument("--principal", required=True)
+    s.add_argument("--approver-key", type=Path, required=True)
+    s.add_argument("--request", help="request ID to open after signing in")
+    s.add_argument("--ui", default=os.environ.get("FRONTEND_URL", "http://localhost:8081"), help="team UI address")
+    s.set_defaults(fn=cmd_approver_login)
+
+    s = sub.add_parser("approve", help="approve (or --reject) a scope request with your approver key")
+    s.add_argument("request_id")
+    s.add_argument("--principal", required=True)
+    s.add_argument("--approver-key", type=Path, required=True)
+    s.add_argument("--user-code", required=True, help="the code the agent showed you; it must match the request")
+    s.add_argument("--reject", action="store_true")
+    s.add_argument("--approved", help="approve less than asked: JSON {scope, clearance, ttl}")
+    s.add_argument("--url", default=os.environ.get("ISSUER_URL", "http://localhost:8083"), help="issuer address")
+    s.set_defaults(fn=cmd_approve)
 
     s = sub.add_parser("grant-key", help="make sure the gateway's tool-grant key exists (servers mount the .pub)")
     s.set_defaults(fn=cmd_grant_key)

@@ -14,14 +14,17 @@ from __future__ import annotations
 
 import fnmatch
 import logging
+import os
 import posixpath
 import time
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 
 import jwt
 
 from .common import canonical, jwk_thumbprint, jwk_to_pub, pub_to_pem, sha256_hex, verify_bytes
 from .audience import check_audience
+from .grants import GRANTS_SERVER, GRANTS_TOOLS
 from .interfaces import check_clearance
 from .status_list import is_revoked
 
@@ -159,6 +162,17 @@ def verify_mandate(token: str, registry, status_lists: dict[str, str]) -> dict:
             raise Reject("REVOKED", claims["jti"])
     except ValueError as e:
         raise Reject("STATUS_UNAVAILABLE", str(e))
+    # a supplementary mandate dies with the one it was minted from (add-scope-requests)
+    if (parent := claims.get("parent")) is not None:
+        psl = (parent.get("status") or {}) if isinstance(parent, dict) else {}
+        parent_jwt = status_lists.get(psl.get("uri"))
+        if parent_jwt is None or "idx" not in psl:
+            raise Reject("STATUS_UNAVAILABLE", f"parent status list {psl.get('uri')}")
+        try:
+            if is_revoked(parent_jwt, psl["idx"], pub, psl["uri"]):
+                raise Reject("PARENT_REVOKED", parent.get("jti", ""))
+        except ValueError as e:
+            raise Reject("STATUS_UNAVAILABLE", str(e))
     return claims
 
 
@@ -182,6 +196,9 @@ def check_request(
     # clearance before scope, so no shape of scope entries can route around it
     if refused := check_clearance(req.server, claims):
         return refused
+    # the gateway's own grants server needs no scope entry: it only ever concerns the calling mandate
+    if req.server == GRANTS_SERVER:
+        return ("ALLOW", "IN_SCOPE", "") if req.tool in GRANTS_TOOLS else ("DENY", "OUT_OF_SCOPE", name)
     # Each entry is a whole grant: the call is allowed if any one entry accepts every argument it constrains,
     # so a request cannot take urn from one entry and path from another.
     refused = None  # the first matching entry's reason, reported when no entry accepts the call
@@ -220,6 +237,47 @@ def check_request(
     return refused or ("DENY", "OUT_OF_SCOPE", name)
 
 
+# ---------------------------------------------------------------- pre-approved held calls
+
+
+def action_hash(server: str, tool: str, arguments: dict, mandate_hash: str) -> str:
+    """What one held call was: server, tool, exact arguments and the mandate it was held under. No nonce or ts,
+    so the approved retry of the same call has the same hash."""
+    return sha256_hex(canonical({"server": server, "tool": tool, "arguments": arguments, "mandate_hash": mandate_hash}))
+
+
+class PreapprovalUses:
+    """Which pre-approved actions have been used. SQLite at GATEWAY_STATE_DB (durable), else memory."""
+
+    def __init__(self, path: str | None):
+        self._mem: set[tuple[str, str]] = set()
+        self._db = None
+        if path:
+            import sqlite3  # noqa: PLC0415
+
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            self._db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
+            self._db.execute(
+                "CREATE TABLE IF NOT EXISTS preapproval_uses (jti TEXT NOT NULL, action_hash TEXT NOT NULL, "
+                "used_at REAL NOT NULL, PRIMARY KEY (jti, action_hash))"
+            )
+
+    def use(self, jti: str, ah: str) -> bool:
+        """True the first time; False if this mandate already used this pre-approval."""
+        if self._db is None:
+            if (jti, ah) in self._mem:
+                return False
+            self._mem.add((jti, ah))
+            return True
+        import sqlite3  # noqa: PLC0415
+
+        try:
+            self._db.execute("INSERT INTO preapproval_uses VALUES (?, ?, ?)", (jti, ah, time.time()))
+        except sqlite3.IntegrityError:
+            return False
+        return True
+
+
 # ---------------------------------------------------------------- the pipeline
 
 
@@ -229,6 +287,21 @@ class Gateway:
         self.status_lists = status_lists
         self.step_up = step_up_patterns or ["*.write", "*.draft", "special.*"]
         self._seen_nonces: set[str] = set()
+        self.preapproval_uses = PreapprovalUses(os.environ.get("GATEWAY_STATE_DB"))
+
+    def _preapproved(self, req: Request, claims: dict) -> str | None:
+        """The action hash when this held call is pre-approved by the mandate and not yet used, else None.
+
+        Using it is recorded here, before the call is forwarded, so it goes through once.
+        """
+        preapproved = claims.get("preapproved") or []
+        parent_hash = (claims.get("parent") or {}).get("mandate_hash")
+        if not preapproved or not parent_hash:
+            return None
+        ah = action_hash(req.server, req.tool, req.arguments, parent_hash)
+        if ah not in preapproved:
+            return None
+        return ah if self.preapproval_uses.use(claims["jti"], ah) else None
 
     def decide(self, req: Request) -> Decision:
         return self.decide_with_context(req)[0]
@@ -260,6 +333,8 @@ class Gateway:
                 req, claims["scope"], claims["deny"], self.step_up, claims, matched
             )
             ctx.entry = matched[0] if matched else None
+            if decision == "STEP_UP" and (ah := self._preapproved(req, claims)):
+                decision, code, detail = "ALLOW", "PREAPPROVED", ah
             return Decision(decision, code, agent_id=claims["agent_id"], detail=detail, **base), ctx
         except Reject as r:
             result = Decision("DENY", r.code, agent_id=None, detail=r.detail, **base)

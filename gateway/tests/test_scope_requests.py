@@ -1,0 +1,428 @@
+"""Scope requests, approvals and supplementary mandates (OpenSpec add-scope-requests, spec scope-requests)."""
+
+import json
+
+import jwt
+import pytest
+from fastapi.testclient import TestClient
+
+import issuer.app as issuer
+from gateway import cli
+from gateway.lib import grants
+from gateway.lib.common import generate_keypair
+
+PRINCIPAL = "officer:test"
+CEILING = {
+    PRINCIPAL: {
+        "servers": {
+            "directory": ["roster", "name"],
+            "schools": ["list", "classification"],
+            "special": ["record"],
+            "pupil-data": ["search", "get", "aggregate", "classification", "roster", "pupil", "draft", "write"],
+        },
+        "urns": ["SCH01", "SCH02", "SCH03", "SCH04"],
+        "max_clearance": 4,
+    }
+}
+SCH04_Y11 = {"urn": "SCH04", "year_group": 11, "academic_year": "2023/24", "term": "SPR"}
+SCH02_Y11 = {**SCH04_Y11, "urn": "SCH02"}
+
+
+def roster(urn):
+    return [{"server": "directory", "tools": ["roster"], "constraints": {"urn": [urn]}}]
+
+
+@pytest.fixture
+def flow(stack, monkeypatch):
+    client, mandate, call, state = stack
+    (state / "principals.json").write_text(json.dumps(CEILING))
+    approver, _ = generate_keypair()
+    cli.register_approver(state, PRINCIPAL, approver.public_key())
+    issuer.reset(state)
+    ic = TestClient(issuer.app)
+
+    def issuer_call(method, path, payload=None):
+        r = ic.request(method, path, json=payload)
+        if r.status_code >= 400:
+            body = r.json()
+            raise grants.IssuerRefused(body.get("error", f"ISSUER_{r.status_code}"), body.get("detail", ""), body)
+        return r.json()
+
+    # the issuer sends events while the gateway is still inside the call that caused them; one TestClient can't
+    # serve a request from inside another, so events are queued and delivered after each call
+    queued: list[str] = []
+
+    def deliver_queued():
+        while queued:
+            r = client.post("/internal/audit-events", json={"token": queued.pop(0)})
+            assert r.status_code in (200, 201), r.text
+
+    def call_and_deliver(*a, **kw):
+        result = call(*a, **kw)
+        deliver_queued()
+        return result
+
+    monkeypatch.setattr(grants, "issuer_call", issuer_call)
+    monkeypatch.setattr(issuer, "_poster", queued.append)
+
+    def request(token, key=None, **arguments):
+        arguments.setdefault("ttl", 3600)
+        arguments.setdefault("reason", "letters for the absence list")
+        return call_and_deliver(client, token, "grants", "request", key=key, **arguments)
+
+    def login():
+        return ic.post("/approver/login", json={"token": cli.login_token(approver, PRINCIPAL)}).json()["session"]
+
+    def decide(rid, code, decision="approve", session=None, approved=None):
+        headers = {"x-approver-session": session} if session else {}
+        body = {"decision": decision, "user_code": code, "approved": approved}
+        r = ic.post(f"/requests/{rid}/decision", json=body, headers=headers)
+        deliver_queued()
+        return r
+
+    return {
+        "client": client, "mandate": mandate, "call": call_and_deliver, "state": state, "ic": ic,
+        "request": request, "login": login, "decide": decide, "approver": approver,
+    }  # fmt: skip
+
+
+def events(jti):
+    import asyncio  # noqa: PLC0415
+
+    from gateway.lib import audit  # noqa: PLC0415
+
+    return asyncio.run(audit.get_store().for_jtis({jti}))
+
+
+def jti_of(token):
+    return jwt.decode(token, options={"verify_signature": False})["jti"]
+
+
+# ---------------------------------------------------------------- the grants server
+
+
+def test_introspection_needs_no_scope_entry(flow):
+    f = flow
+    status, resp = f["call"](f["client"], f["mandate"](roster("SCH04"), clearance=2), "grants", "self")
+    assert status == 200
+    assert resp["result"]["scope"][0]["constraints"] == {"urn": ["SCH04"]}
+    assert "Dunmore Community College (SCH04)" in resp["result"]["summary"]
+
+
+def test_grants_needs_a_clearance_claim(flow):
+    f = flow
+    status, resp = f["call"](f["client"], f["mandate"](roster("SCH04")), "grants", "self")
+    assert (status, resp["decision"]["reason_code"]) == (403, "CLEARANCE_MISSING")
+
+
+def test_issuer_can_forbid_asking_for_more(flow):
+    f = flow
+    token = f["mandate"](roster("SCH04"), deny=["grants.request"], clearance=2)
+    status, resp = f["request"](token, scope=roster("SCH02"))
+    assert (status, resp["decision"]["reason_code"]) == (403, "DENIED_BY_RULE")
+
+
+def test_grants_calls_are_audited(flow):
+    f = flow
+    token = f["mandate"](roster("SCH04"), clearance=2)
+    _, resp = f["call"](f["client"], token, "grants", "self")
+    mine = [e for e in events(jti_of(token)) if e["decision_id"] == resp["decision"]["decision_id"]]
+    assert [(e["server"], e["tool"], e["max_pii_level"]) for e in mine] == [("grants", "self", 1)]
+
+
+def test_check_reports_the_missing_school(flow):
+    f = flow
+    token = f["mandate"](roster("SCH04"), clearance=2)
+    check = {"server": "directory", "tool": "roster", "arguments": {"urn": "SCH02", "year_group": 11}}
+    status, resp = f["call"](f["client"], token, "grants", "check", args=check)
+    assert status == 200
+    r = resp["result"]
+    assert (r["decision"], r["reason_code"]) == ("DENY", "CONSTRAINT_VIOLATED")
+    assert r["missing"]["scope"] == [{"server": "directory", "tools": ["roster"], "constraints": {"urn": ["SCH02"]}}]
+
+
+def test_check_does_not_forward(flow, monkeypatch):
+    f = flow
+    from gateway import main  # noqa: PLC0415
+
+    monkeypatch.setitem(main.MCP_SERVERS, "directory", "http://nowhere.invalid/mcp/")
+    token = f["mandate"](roster("SCH04"), clearance=2)
+    check = {"server": "directory", "tool": "roster", "arguments": SCH04_Y11}
+    status, resp = f["call"](f["client"], token, "grants", "check", args=check)
+    assert (status, resp["result"]["decision"]) == (200, "ALLOW")
+
+
+# ---------------------------------------------------------------- making a request
+
+
+def test_already_granted(flow):
+    f = flow
+    status, resp = f["request"](f["mandate"](roster("SCH04"), clearance=2), scope=roster("SCH04"))
+    assert (status, resp["result"]["status"], resp["result"]["next_action"]) == (200, "already_granted", "retry")
+
+
+def test_reason_too_long(flow):
+    f = flow
+    status, resp = f["request"](f["mandate"](roster("SCH04"), clearance=2), scope=roster("SCH02"), reason="x" * 501)
+    assert (status, resp["decision"]["reason_code"]) == (403, "REQUEST_INVALID")
+
+
+def test_beyond_the_persons_schools(flow):
+    f = flow
+    scope = [{"server": "pupil-data", "tools": ["search"], "constraints": {"urn": ["SCH09"]}}]
+    status, resp = f["request"](f["mandate"](roster("SCH04"), clearance=4), scope=scope)
+    assert (status, resp["decision"]["reason_code"]) == (403, "EXCEEDS_PRINCIPAL")
+
+
+def test_audience_by_sensitive_attribute_refused(flow):
+    f = flow
+    scope = [{**roster("SCH04")[0], "audience": {"InCareAtCurrentSchool": "1"}}]
+    status, resp = f["request"](f["mandate"](roster("SCH01"), clearance=2), scope=scope)
+    assert (status, resp["decision"]["reason_code"]) == (403, "REQUEST_INVALID")
+
+
+def test_pending_request_tells_the_agent_what_to_do(flow):
+    f = flow
+    status, resp = f["request"](f["mandate"](roster("SCH04"), clearance=2), scope=roster("SCH02"), ttl=7200)
+    r = resp["result"]
+    assert (status, r["status"], r["next_action"]) == (200, "pending", "ask_user")
+    assert len(r["user_code"].replace("-", "")) >= 6
+    assert not set(r["user_code"]) & set("01IOLU")
+    assert r["approval_url"].endswith(f"/approve/{r['request_id']}")
+    assert "Brookmere High School (SCH02)" in r["summary"]
+    assert "for 2 hours" in r["summary"]
+    assert r["user_code"] in r["text"]
+    assert 'Replying "yes" here does not approve it.' in r["text"]
+
+
+# ---------------------------------------------------------------- a person decides
+
+
+def test_person_flow_end_to_end(flow):
+    f = flow
+    parent = f["mandate"](roster("SCH04"), clearance=2)
+    rid_view = f["request"](parent, scope=roster("SCH02"))[1]["result"]
+    rid, code = rid_view["request_id"], rid_view["user_code"]
+
+    # opening the URL is not approving
+    r = f["decide"](rid, code)
+    assert (r.status_code, r.json()["error"]) == (401, "APPROVER_REQUIRED")
+    # another person's approver key doesn't count
+    other, _ = generate_keypair()
+    cli.register_approver(f["state"], "officer:priya", other.public_key())
+    priya = f["ic"].post("/approver/login", json={"token": cli.login_token(other, "officer:priya")}).json()["session"]
+    assert f["decide"](rid, code, session=priya).json()["error"] == "NOT_THE_APPROVER"
+    # signed-in UI user who isn't the approver: same refusal, request still pending
+    assert f["call"](f["client"], parent, "grants", "status", request_id=rid)[1]["result"]["status"] == "pending"
+
+    session = f["login"]()
+    view = f["ic"].get(f"/requests/{rid}/view", headers={"x-approver-session": session}).json()
+    assert view["can_decide"] is True
+    assert view["agent_reason"] == "letters for the absence list"
+    approved = {"scope": roster("SCH02"), "clearance": 2, "ttl": 1800}
+    r = f["decide"](rid, code, session=session, approved=approved)
+    assert (r.status_code, r.json()["status"]) == (200, "approved")
+    assert f["decide"](rid, code, session=session).json()["error"] == "ALREADY_DECIDED"
+
+    _, resp = f["call"](f["client"], parent, "grants", "status", request_id=rid)
+    result = resp["result"]
+    assert (result["status"], result["next_action"]) == ("approved", "retry")
+    child = result["mandate"]
+    claims, pclaims = (jwt.decode(t, options={"verify_signature": False}) for t in (child, parent))
+    assert claims["cnf"] == pclaims["cnf"]
+    assert claims["scope"] == roster("SCH02")
+    assert claims["parent"]["jti"] == pclaims["jti"]
+    assert claims["approved_by"]["kind"] == "person"
+    assert claims["exp"] <= pclaims["exp"]
+    # the new grant works, and only through the new mandate
+    assert f["call"](f["client"], child, "directory", "roster", **SCH02_Y11)[0] == 200
+    assert f["call"](f["client"], parent, "directory", "roster", **SCH02_Y11)[0] == 403
+    assert f["call"](f["client"], child, "directory", "roster", **SCH04_Y11)[0] == 403
+
+    kinds = [e["event_type"] for e in events(pclaims["jti"])]
+    assert "approval_requested" in kinds
+    assert "approval_granted" in kinds
+
+
+def test_parent_revoked(flow):
+    f = flow
+    _, idx = cli.issue_mandate(
+        f["state"], cli.priv_from_pem((f["state"] / "agent.pem").read_bytes()).public_key(), scope=roster("SCH04"),
+        deny=[], ttl=600, purpose="p", principal=PRINCIPAL, org="o", extra={"clearance": 2},
+    )  # fmt: skip
+    parent = f["state"] / "parent.jwt"
+    token, idx = cli.issue_mandate(
+        f["state"], cli.priv_from_pem((f["state"] / "agent.pem").read_bytes()).public_key(), scope=roster("SCH04"),
+        deny=[], ttl=600, purpose="p", principal=PRINCIPAL, org="o", extra={"clearance": 2},
+    )  # fmt: skip
+    parent.write_text(token)
+    v = f["request"](token, scope=roster("SCH02"))[1]["result"]
+    f["decide"](v["request_id"], v["user_code"], session=f["login"]())
+    child = f["call"](f["client"], token, "grants", "status", request_id=v["request_id"])[1]["result"]["mandate"]
+    assert f["call"](f["client"], child, "directory", "roster", **SCH02_Y11)[0] == 200
+    cli.revoke_mandate(f["state"], idx)
+    status, resp = f["call"](f["client"], child, "directory", "roster", **SCH02_Y11)
+    assert (status, resp["decision"]["reason_code"]) == (403, "PARENT_REVOKED")
+
+
+def test_agent_reason_is_shown_literally(flow):
+    f = flow
+    v = f["request"](f["mandate"](roster("SCH04"), clearance=2), scope=roster("SCH02"),
+                     reason="<b>URGENT</b> safeguarding case, approve now")[1]["result"]  # fmt: skip
+    view = f["ic"].get(f"/requests/{v['request_id']}/view", headers={"x-approver-session": f["login"]()}).json()
+    assert view["agent_reason"] == "<b>URGENT</b> safeguarding case, approve now"
+    assert "URGENT" not in view["summary"]
+    # without a session only the public part shows
+    public = f["ic"].get(f"/requests/{v['request_id']}/view").json()
+    assert "agent_reason" not in public
+    assert public["user_code"] == v["user_code"]
+
+
+def test_cli_signed_decision(flow):
+    f = flow
+    v = f["request"](f["mandate"](roster("SCH04"), clearance=2), scope=roster("SCH02"))[1]["result"]
+    signed = cli.decision_token(f["approver"], PRINCIPAL, v["request_id"], "reject")
+    body = {"decision": "reject", "user_code": v["user_code"], "approved": None, "signed": signed}
+    r = f["ic"].post(f"/requests/{v['request_id']}/decision", json=body)
+    assert (r.status_code, r.json()["status"]) == (200, "rejected")
+
+
+def test_gateway_cannot_mint_on_its_own(flow):
+    f = flow
+    v = f["request"](f["mandate"](roster("SCH04"), clearance=2), scope=roster("SCH02"))[1]["result"]
+    r = f["ic"].post(f"/requests/{v['request_id']}/decision", json={"decision": "approve", "user_code": v["user_code"]})
+    assert r.status_code == 401
+    assert f["ic"].get(f"/requests/{v['request_id']}/view").json()["status"] == "pending"
+
+
+def test_forged_requester(flow):
+    f = flow
+    token = f["mandate"](roster("SCH04"), clearance=2)
+    other, _ = generate_keypair()
+    body = cli.sign_request(other, server="grants", tool="request", mandate=token,
+                            arguments={"scope": roster("SCH02"), "ttl": 600, "reason": "x"})  # fmt: skip
+    r = f["ic"].post("/internal/requests", json={"call": body})
+    assert (r.status_code, r.json()["error"]) == (403, "POP_FAILED")
+
+
+# ---------------------------------------------------------------- supervisors
+
+
+def test_supervisor_passes_down_part_of_its_access(flow):
+    f = flow
+    helper_key, _ = generate_keypair()
+    helper = f["mandate"](roster("SCH01"), key=helper_key, clearance=2)
+    supervisor = f["mandate"](roster("SCH04"), clearance=2, can_delegate=True)
+    v = f["request"](helper, key=helper_key, scope=roster("SCH04"))[1]["result"]
+    status, resp = f["call"](f["client"], supervisor, "grants", "decide", request_id=v["request_id"],
+                             decision="approve")  # fmt: skip
+    assert (status, resp["result"]["status"]) == (200, "approved")
+    child = f["call"](f["client"], helper, "grants", "status", key=helper_key,
+                      request_id=v["request_id"])[1]["result"]["mandate"]  # fmt: skip
+    assert jwt.decode(child, options={"verify_signature": False})["approved_by"]["kind"] == "agent"
+
+
+def test_supervisor_cannot_pass_on_what_it_lacks(flow):
+    f = flow
+    helper_key, _ = generate_keypair()
+    helper = f["mandate"](roster("SCH01"), key=helper_key, clearance=4)
+    supervisor = f["mandate"](roster("SCH04"), clearance=2, can_delegate=True)
+    special = [{"server": "special", "tools": ["record"], "constraints": {"urn": ["SCH04"]}}]
+    v = f["request"](helper, key=helper_key, scope=special, clearance=4)[1]["result"]
+    status, resp = f["call"](f["client"], supervisor, "grants", "decide", request_id=v["request_id"],
+                             decision="approve")  # fmt: skip
+    assert (status, resp["decision"]["reason_code"]) == (403, "EXCEEDS_SUPERVISOR")
+    assert f["ic"].get(f"/requests/{v['request_id']}/view").json()["status"] == "pending"
+
+
+def test_agent_cannot_approve_itself(flow):
+    f = flow
+    token = f["mandate"](roster("SCH04"), clearance=2, can_delegate=True)
+    v = f["request"](token, scope=roster("SCH02"))[1]["result"]
+    status, resp = f["call"](f["client"], token, "grants", "decide", request_id=v["request_id"], decision="approve")
+    assert (status, resp["decision"]["reason_code"]) == (403, "SELF_APPROVAL")
+
+
+# ---------------------------------------------------------------- lifecycle and limits
+
+
+def test_nobody_answers(flow):
+    f = flow
+    token = f["mandate"](roster("SCH04"), clearance=2)
+    v = f["request"](token, scope=roster("SCH02"))[1]["result"]
+    issuer.store()._exec("UPDATE requests SET expires = 0 WHERE id = ?", (v["request_id"],))  # noqa: SLF001
+    result = f["call"](f["client"], token, "grants", "status", request_id=v["request_id"])[1]["result"]
+    assert (result["status"], result["next_action"]) == ("expired", "request_again")
+    assert "approval_expired" in [e["event_type"] for e in events(jti_of(token))]
+
+
+def test_someone_elses_request(flow):
+    f = flow
+    v = f["request"](f["mandate"](roster("SCH04"), clearance=2), scope=roster("SCH02"))[1]["result"]
+    other = f["mandate"](roster("SCH04"), clearance=2)
+    status, resp = f["call"](f["client"], other, "grants", "status", request_id=v["request_id"])
+    assert (status, resp["decision"]["reason_code"]) == (403, "OUT_OF_SCOPE")
+    assert "result" not in resp
+
+
+def test_asking_again_after_rejection(flow):
+    f = flow
+    token = f["mandate"](roster("SCH04"), clearance=2)
+    v = f["request"](token, scope=roster("SCH02"))[1]["result"]
+    f["decide"](v["request_id"], v["user_code"], decision="reject", session=f["login"]())
+    status, resp = f["request"](token, scope=roster("SCH02"))
+    assert (status, resp["decision"]["reason_code"]) == (403, "RECENTLY_REJECTED")
+
+
+def test_too_many_pending(flow):
+    f = flow
+    token = f["mandate"](roster("SCH04"), clearance=2)
+    for urn in ("SCH01", "SCH02", "SCH03"):
+        assert f["request"](token, scope=roster(urn))[0] == 200
+    names = [{"server": "directory", "tools": ["name"], "constraints": {"urn": ["SCH02"]}}]
+    status, resp = f["request"](token, scope=names)
+    assert (status, resp["decision"]["reason_code"]) == (403, "TOO_MANY_REQUESTS")
+
+
+# ---------------------------------------------------------------- held calls
+
+
+WRITE = {"pupil_id": "P0011", "urn": "SCH04", "column": "FSMeligible", "value": "1", "reason": "free meals confirmed"}
+
+
+def _held(f):
+    scope = [{"server": "pupil-data", "tools": ["write"], "constraints": {"urn": ["SCH04"]}}]
+    token = f["mandate"](scope, deny=[], clearance=4)
+    status, resp = f["call"](f["client"], token, "pupil-data", "write", **WRITE)
+    assert (status, resp["decision"]["reason_code"]) == (202, "SENSITIVE_TOOL")
+    return token, resp["decision"]["decision_id"]
+
+
+def test_correction_approved_and_applied_once(flow, tmp_path, monkeypatch):
+    f = flow
+    from mcp_server.api import routes_mcp  # noqa: PLC0415
+
+    monkeypatch.setattr(routes_mcp, "WRITES_PATH", tmp_path / "corrections.jsonl")
+    token, did = _held(f)
+    held = {"decision_id": did, "server": "pupil-data", "tool": "write", "arguments": WRITE}
+    v = f["request"](token, held=held)[1]["result"]
+    view = f["ic"].get(f"/requests/{v['request_id']}/view", headers={"x-approver-session": f["login"]()}).json()
+    assert view["held_action"] == "Change FSMeligible to 1 for pupil P0011 at Dunmore Community College (SCH04)"
+    f["decide"](v["request_id"], v["user_code"], session=f["login"]())
+    child = f["call"](f["client"], token, "grants", "status", request_id=v["request_id"])[1]["result"]["mandate"]
+    status, resp = f["call"](f["client"], child, "pupil-data", "write", **WRITE)
+    assert (status, resp["decision"]["reason_code"]) == (200, "PREAPPROVED")
+    status, resp = f["call"](f["client"], child, "pupil-data", "write", **WRITE)
+    assert (status, resp["decision"]["reason_code"]) == (202, "SENSITIVE_TOOL")
+    status, _ = f["call"](f["client"], child, "pupil-data", "write", **{**WRITE, "value": "0"})
+    assert status == 202
+    exp = jwt.decode(child, options={"verify_signature": False})
+    assert exp["exp"] - exp["iat"] <= 300
+
+
+def test_held_call_with_different_arguments(flow):
+    f = flow
+    token, did = _held(f)
+    held = {"decision_id": did, "server": "pupil-data", "tool": "write", "arguments": {**WRITE, "value": "0"}}
+    status, resp = f["request"](token, held=held)
+    assert (status, resp["decision"]["reason_code"]) == (403, "REQUEST_INVALID")

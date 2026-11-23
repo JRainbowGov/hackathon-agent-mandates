@@ -23,7 +23,7 @@ from fastmcp.exceptions import ToolError
 from pydantic import BaseModel
 
 from gateway.cli import sign_request
-from gateway.lib import audit, budgets, safe_counts
+from gateway.lib import audit, budgets, grants, safe_counts
 from gateway.lib.common import generate_keypair, pub_to_jwk
 from gateway.lib.gateway_verify import AuditContext, Gateway, Request
 from gateway.lib.grant_issue import BREAKDOWN_MAX_ROWS, grant_for
@@ -96,6 +96,7 @@ async def describe() -> dict:
                 for t in await client.list_tools()
             ]
     servers[AUDIT_SERVER] = [{"name": n, "description": d} for n, d in AUDIT_TOOLS.items()]
+    servers[grants.GRANTS_SERVER] = [{"name": n, "description": d} for n, d in grants.GRANTS_TOOLS.items()]
     priv, pub = generate_keypair()
     example = sign_request(
         priv,
@@ -209,6 +210,24 @@ STATUS_FOR = {"ALLOW": HTTPStatus.OK, "STEP_UP": HTTPStatus.ACCEPTED, "DENY": HT
 TOO_MANY = {"RATE_LIMITED", "BUDGET_EXHAUSTED"}
 
 
+async def _grants(body: CallBody, ctx: AuditContext, decision_id: str):
+    """(status, data, error, refusal) for an allowed grants call. A refusal from the grants layer becomes this
+    call's decision, so the audit event and the response both carry it."""
+    outcome = await grants.handle(
+        body.tool,
+        body.model_dump(),
+        ctx.claims,
+        decision_id=decision_id,
+        step_up=state["gateway"].step_up,
+        revoked=lambda _claims: False,  # verify_mandate already refused revoked mandates and dead parents
+    )
+    if outcome.deny:
+        return HTTPStatus.FORBIDDEN, None, None, outcome.deny
+    return HTTPStatus.OK, outcome.data, None, None
+
+
+
+
 @app.post("/tools/call")
 async def tools_call(body: CallBody, http: HTTPRequest = None):  # None when called in-process (demo)
     gateway: Gateway = state["gateway"]
@@ -269,6 +288,10 @@ async def _allowed(limits: budgets.State, decision, ctx, plan, body: CallBody, *
         if refused := await budgets.before_forward(limits, plan):
             decision = _deny(decision, *refused)
             status, data, error = HTTPStatus.TOO_MANY_REQUESTS, None, None
+        elif body.server == grants.GRANTS_SERVER:
+            status, data, error, by_grants = await _grants(body, ctx, decision_id)
+            if by_grants:
+                decision = _deny(decision, *by_grants)
         else:
             status, data, error = await _forward(body, ctx, decision_id, safe_counts.k_for(ctx.claims))
         min_level = safe_counts.max_level(body.arguments) if counts else None

@@ -448,7 +448,9 @@ def test_gateway_server_results_scored_at_server_level(gw):  # noqa: F811
 
 def test_parent_jti_comes_from_the_parent_claim(gw):  # noqa: F811
     client, _, state = gw
-    child = issue(state, "child.jwt", claims={"parent": {"jti": "urn:uuid:parent-1", "status": {"idx": 0}}})
+    # a real parent claim names a status list the gateway can read (add-scope-requests checks the parent's bit)
+    uri = json.loads((state / "status_list.json").read_text())["uri"]
+    child = issue(state, "child.jwt", claims={"parent": {"jti": "urn:uuid:parent-1", "status": {"uri": uri, "idx": 0}}})
     caller(state, child)(client, "pupil-data", "search", query="P0004", urn="SCH01")
     (event,) = all_events()
     assert event["parent_jti"] == "urn:uuid:parent-1"

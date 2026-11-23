@@ -42,7 +42,9 @@ def stack(tmp_path, monkeypatch):
         )
         return token
 
-    def call(client, token, server, tool, key=None, **arguments):
+    def call(client, token, server, tool, *, key=None, args=None, **arguments):
+        """`args` passes the tool's arguments as one dict, for tools whose arguments are named server or tool."""
+        arguments = args if args is not None else arguments
         body = cli.sign_request(key or agent_priv, server=server, tool=tool, arguments=arguments, mandate=token)
         r = client.post("/tools/call", json=body)
         return r.status_code, r.json()
