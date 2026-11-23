@@ -96,6 +96,7 @@ The scope-requests change puts the issuer key in its own service, so approvals h
 - **Idempotent:** the event's own UUID becomes its `decision_id`, which is `UNIQUE`, so an outbox that retries after a lost acknowledgement doesn't duplicate history.
 - **Reachable publicly:** the signature is the gate, not the network. Without the issuer key nobody can write approval history.
 - **Window:** events are accepted up to a day after `iat` and until `exp`, so retries survive an outage.
+- **The minted mandate:** an `approval_granted` event may carry `minted_jti`, so the chain links an approval to the supplementary mandate it produced. Fields added later (`OPTIONAL_FIELDS`) are hashed only when set, so events stored before them still verify, and an older SQLite file gains the column when opened.
 - *Alternative:* the issuer writes to the SQLite file directly. Rejected: two writers to one chain, and the file is the gateway's.
 
 ### 11. Schema

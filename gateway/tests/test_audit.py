@@ -510,3 +510,40 @@ def test_unsigned_or_wrong_events_are_refused(gw, make, status, code):  # noqa: 
     r = client.post("/internal/audit-events", json={"token": make(state)})
     assert (r.status_code, r.json()["reason_code"]) == (status, code)
     assert all_events() == []
+
+
+# ---------------------------------------------------------------- minted mandate on approval events
+
+
+def test_unset_optional_field_keeps_old_hashes():
+    e = _bare_event()
+    content = audit.content_of(e)
+    assert "minted_jti" not in content  # unset: hashed exactly as before the field existed
+    assert audit.content_of({**e, "minted_jti": "urn:uuid:m1"})["minted_jti"] == "urn:uuid:m1"
+
+
+def test_old_audit_file_gains_the_column_and_still_verifies(tmp_path):
+    cli.main(["--state", str(tmp_path), "init"])
+    path = tmp_path / "audit.sqlite"
+    raw = sqlite3.connect(path)
+    raw.executescript(audit.SQLITE_SCHEMA.replace(" minted_jti TEXT,", ""))  # a file from before the field
+    raw.close()
+    store = audit.SqliteStore(audit.Signer(tmp_path), path)
+    asyncio.run(store.append(_bare_event()))
+    asyncio.run(store.append(_bare_event(event_type="approval_granted", decision=None, minted_jti="urn:uuid:m1")))
+    pub = pub_from_pem((tmp_path / "gateway.pub").read_bytes())
+    chain = asyncio.run(store.all_events())
+    assert [e["minted_jti"] for e in chain] == [None, "urn:uuid:m1"]
+    assert audit.verify_chain(chain, pub) == []
+
+
+def test_signed_approval_carries_the_minted_mandate(gw):  # noqa: F811
+    client, _, state = gw
+    r = client.post("/internal/audit-events", json={"token": approval(state, minted_jti="urn:uuid:minted-1")})
+    assert r.status_code == 201, r.text
+    (event,) = all_events()
+    assert event["minted_jti"] == "urn:uuid:minted-1"
+    out = reader(state, principal="officer:jsmith")(client, "audit", "events", principal="officer:jsmith").json()
+    assert out["result"]["verified"][0]["minted_jti"] == "urn:uuid:minted-1"
+    bad = client.post("/internal/audit-events", json={"token": approval(state, minted_jti=7)})
+    assert (bad.status_code, bad.json()["reason_code"]) == (400, "EVENT_REJECTED")

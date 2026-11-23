@@ -60,11 +60,15 @@ The gateway SHALL give its own layers (flow enforcement, budgets, approvals, the
 - **THEN** that event is in the hash chain after the held call's event, and appears in `audit.events` for that mandate
 
 ### Requirement: The issuer service can add signed approval events
-The gateway SHALL accept approval events from the issuer service at `POST /internal/audit-events`, as a JWT with `typ` `audit-event+jwt` signed by an issuer key on the gateway's trusted list, carrying the event's own UUID (`jti`), `iat`, `exp`, the event type (one of the four approval events), the mandate `jti`, server, tool, the held or requested call's `decision_id`, a reason code, and optionally the principal and agent ID. The gateway SHALL record each accepted event in the same hash chain as decision events, with the event's UUID as its `decision_id`. The same event sent again SHALL be acknowledged without a second record. Any other input MUST be refused and recorded nowhere: not a JWT or the wrong `typ` with `400 EVENT_INVALID`, an issuer not on the trusted list with `403 ISSUER_NOT_ACCREDITED`, a bad signature with `403 SIG_INVALID`, expired or more than a day old with `403 EVENT_EXPIRED`, and an unknown event type or a missing field with `400 EVENT_REJECTED`.
+The gateway SHALL accept approval events from the issuer service at `POST /internal/audit-events`, as a JWT with `typ` `audit-event+jwt` signed by an issuer key on the gateway's trusted list, carrying the event's own UUID (`jti`), `iat`, `exp`, the event type (one of the four approval events), the mandate `jti`, server, tool, the held or requested call's `decision_id`, a reason code, and optionally the principal, the agent ID and, for `approval_granted`, the `jti` of the mandate the approval minted (`minted_jti`, a string). `audit.events` SHALL show `minted_jti` on events that carry it. The gateway SHALL record each accepted event in the same hash chain as decision events, with the event's UUID as its `decision_id`. The same event sent again SHALL be acknowledged without a second record. Any other input MUST be refused and recorded nowhere: not a JWT or the wrong `typ` with `400 EVENT_INVALID`, an issuer not on the trusted list with `403 ISSUER_NOT_ACCREDITED`, a bad signature with `403 SIG_INVALID`, expired or more than a day old with `403 EVENT_EXPIRED`, and an unknown event type or a missing field with `400 EVENT_REJECTED`.
 
 #### Scenario: A person's approval reaches the chain
 - **WHEN** the issuer posts an `approval_granted` event signed with its issuer key, for a mandate delegated by `officer:jsmith`
 - **THEN** the gateway returns `201` with the event's `decision_id`, and `audit.events(principal="officer:jsmith")` lists the approval
+
+#### Scenario: The approval names the mandate it minted
+- **WHEN** the issuer posts an `approval_granted` event with `minted_jti` `urn:uuid:minted-1`
+- **THEN** the stored event and its `audit.events` entry carry `minted_jti` `urn:uuid:minted-1`, and a non-string `minted_jti` is refused with `400 EVENT_REJECTED`
 
 #### Scenario: The issuer retries
 - **WHEN** the issuer posts the same signed event a second time

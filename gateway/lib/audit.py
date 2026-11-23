@@ -65,6 +65,9 @@ FIELDS = (
     "ref_decision_id", "prev_hash",
 )  # fmt: skip
 ARRAY_FIELDS = ("arg_keys", "pupil_ids_returned", "columns_returned")
+# Fields added after events were already being chained. They are hashed only when set, so every event stored before
+# a field existed still verifies unchanged.
+OPTIONAL_FIELDS = ("minted_jti",)  # approval_granted: the supplementary mandate the approval produced
 
 
 class AuditUnavailable(Exception):
@@ -90,6 +93,9 @@ def content_of(event: dict) -> dict:
     out["ts"] = norm_ts(out["ts"])
     for k in ("decision_id", "ref_decision_id"):
         out[k] = None if out[k] is None else str(out[k])
+    for k in OPTIONAL_FIELDS:
+        if event.get(k) is not None:
+            out[k] = str(event[k])
     return out
 
 
@@ -272,7 +278,7 @@ CREATE TABLE IF NOT EXISTS audit_events (
     pupil_ids_returned TEXT NOT NULL,  -- JSON array
     columns_returned   TEXT NOT NULL,  -- JSON array
     max_pii_level      INTEGER CHECK (max_pii_level IS NULL OR max_pii_level BETWEEN 1 AND 4),
-    result_hash TEXT, ref_decision_id TEXT,
+    result_hash TEXT, ref_decision_id TEXT, minted_jti TEXT,
     prev_hash          TEXT NOT NULL UNIQUE,  -- each event can be extended once: the chain can't fork
     event_hash         TEXT NOT NULL UNIQUE,
     sig                TEXT NOT NULL,
@@ -287,7 +293,7 @@ BEGIN SELECT RAISE(ABORT, 'audit_events is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS audit_events_no_delete BEFORE DELETE ON audit_events
 BEGIN SELECT RAISE(ABORT, 'audit_events is append-only'); END;
 """
-COLUMNS = ("seq", *FIELDS, "event_hash", "sig")
+COLUMNS = ("seq", *FIELDS, *OPTIONAL_FIELDS, "event_hash", "sig")
 
 
 class SqliteStore:
@@ -311,6 +317,10 @@ class SqliteStore:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA synchronous=FULL")  # an acknowledged event survives a crash
             self._conn.executescript(SQLITE_SCHEMA)
+            existing = {r[1] for r in self._conn.execute("PRAGMA table_info(audit_events)")}
+            for column in OPTIONAL_FIELDS:  # a file created before the field existed gains the column
+                if column not in existing:
+                    self._conn.execute(f"ALTER TABLE audit_events ADD COLUMN {column} TEXT")
         self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.row_factory = sqlite3.Row
 
@@ -338,7 +348,8 @@ class SqliteStore:
                 row["identity_verified"] = int(bool(row["identity_verified"]))
                 for k in ARRAY_FIELDS:
                     row[k] = json.dumps(row[k])
-                cols = [*FIELDS, "event_hash", "sig"]
+                cols = [*FIELDS, *OPTIONAL_FIELDS, "event_hash", "sig"]
+                row.update({k: content.get(k) for k in OPTIONAL_FIELDS})
                 cur = conn.execute(
                     f"INSERT INTO audit_events ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",  # noqa: S608
                     [row[k] for k in cols],
@@ -506,6 +517,7 @@ async def record_external(
     principal: str | None = None,
     agent_id: str | None = None,
     event_id: str | None = None,
+    minted_jti: str | None = None,
 ) -> dict:
     """Add an event another gateway layer produced (approvals) to the same chain. jti must be verified upstream.
 
@@ -535,6 +547,7 @@ async def record_external(
         reason_code=reason_code,
         ref_decision_id=ref_decision_id,
         policy_version=None,
+        minted_jti=minted_jti,
     )
     return await store.append(event)
 
@@ -550,14 +563,15 @@ class ExternalEventRejected(Exception):
 
 def sign_external_event(priv, *, iss: str, kid: str, event_type: str, mandate_jti: str, server: str, tool: str,
                         ref_decision_id: str, reason_code: str, principal: str | None = None,
-                        agent_id: str | None = None, event_id: str | None = None, ttl: int = 3600) -> str:
+                        agent_id: str | None = None, event_id: str | None = None, ttl: int = 3600,
+                        minted_jti: str | None = None) -> str:
     """For the issuer service: an approval event, signed with the issuer key, that the gateway will record."""
     now = int(datetime.now(UTC).timestamp())
     claims = {
         "iss": iss, "jti": event_id or str(uuid.uuid4()), "iat": now, "exp": now + ttl,
         "event_type": event_type, "mandate_jti": mandate_jti, "server": server, "tool": tool,
         "ref_decision_id": ref_decision_id, "reason_code": reason_code,
-        "principal": principal, "agent_id": agent_id,
+        "principal": principal, "agent_id": agent_id, "minted_jti": minted_jti,
     }  # fmt: skip
     return jwt.encode(claims, priv_to_pem(priv), algorithm="EdDSA", headers={"typ": EXTERNAL_EVENT_TYP, "kid": kid})
 
@@ -590,6 +604,8 @@ def verify_external_event(token: str, registry) -> dict:
     for k in ("mandate_jti", "server", "tool", "ref_decision_id", "reason_code"):
         if not isinstance(claims.get(k), str) or not claims[k]:
             raise ExternalEventRejected("EVENT_REJECTED", f"{k} is required")
+    if claims.get("minted_jti") is not None and not isinstance(claims["minted_jti"], str):
+        raise ExternalEventRejected("EVENT_REJECTED", "minted_jti must be a string")
     try:
         uuid.UUID(claims["jti"])
     except (ValueError, TypeError) as e:
@@ -608,7 +624,7 @@ async def record_signed_external(token: str, registry) -> tuple[dict, bool]:
     stored = await record_external(
         c["event_type"], jti=c["mandate_jti"], server=c["server"], tool=c["tool"],
         ref_decision_id=c["ref_decision_id"], reason_code=c["reason_code"], principal=c.get("principal"),
-        agent_id=c.get("agent_id"), event_id=c["jti"],
+        agent_id=c.get("agent_id"), event_id=c["jti"], minted_jti=c.get("minted_jti"),
     )  # fmt: skip
     return stored, before is None
 
@@ -662,6 +678,7 @@ def _public(e: dict) -> dict:
         "identity_verified": e["identity_verified"], "jti": e["jti"], "agent_id": e["agent_id"],
         "source_addr": e["source_addr"], "server": e["server"], "tool": e["tool"], "arg_keys": e["arg_keys"],
         "decision": e["decision"], "reason_code": e["reason_code"], "ref_decision_id": e["ref_decision_id"],
+        "minted_jti": e.get("minted_jti"),
     }  # fmt: skip
 
 
