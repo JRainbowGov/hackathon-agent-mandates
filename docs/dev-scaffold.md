@@ -15,6 +15,12 @@ make obs_reset   # stop and drop the volume, so db/init/ runs again on the next 
 The override's variables come from `.env`. If your `.env` predates this change, copy the `POSTGRES_*`,
 `GATEWAY_DB_*`, `POSTGRES_HOST_PORT` and `JAEGER_UI_PORT` lines over from `.env.example`. Compose refuses to start
 and names the missing variable. The values are placeholders, so change them locally and never commit real ones.
+`GATEWAY_DATABASE_URL` is built by plain interpolation, so keep `GATEWAY_DB_PASSWORD` free of `@ : / # %`, or
+URL-encode it.
+
+To point `make eval_run` at a gateway on another port, pass the URL on the make command line:
+`make eval_run GATEWAY_URL=http://localhost:18082`. `GATEWAY_URL=… make eval_run` is silently overridden by the
+`GATEWAY_URL` in `.env`, which the Makefile includes.
 
 What the override adds:
 
@@ -68,7 +74,9 @@ Identifiers and PII levels only, never data values. Arguments are stored as keys
 
 **Append-only is enforced twice.** The gateway connects as `GATEWAY_DB_USER`, which has `SELECT, INSERT` on
 `audit_events` and no `UPDATE`, `DELETE` or `TRUNCATE`. Triggers then refuse those statements for every role,
-including the owner. Only `DROP TRIGGER` by the owner gets past them.
+including the owner. The owner (`POSTGRES_USER`, a superuser in the official image) can still get past them with
+`DROP TRIGGER` or `ALTER TABLE … DISABLE TRIGGER`, so the hash chain and `sig` are what make tampering
+detectable. The gateway role can do neither.
 
 Inspect it:
 
