@@ -18,6 +18,7 @@ from dataclasses import asdict, dataclass
 import jwt
 
 from .common import canonical, jwk_thumbprint, jwk_to_pub, pub_to_pem, sha256_hex, verify_bytes
+from .interfaces import check_clearance
 from .status_list import is_revoked
 
 POLICY_VERSION = "2026-11-18.1"
@@ -101,11 +102,15 @@ def verify_mandate(token: str, registry, status_lists: dict[str, str]) -> dict:
 
 # ---------------------------------------------------------------- scope
 
-def check_request(req: Request, scope: list[dict], deny: list[str], step_up_patterns: list[str]) -> tuple[str, str, str]:
+def check_request(req: Request, scope: list[dict], deny: list[str], step_up_patterns: list[str],
+                  claims: dict) -> tuple[str, str, str]:
     name = f"{req.server}.{req.tool}"
     for pat in deny:
         if fnmatch.fnmatch(name, pat):
             return "DENY", "DENIED_BY_RULE", pat
+    # clearance before scope, so no shape of scope entries can route around it
+    if refused := check_clearance(req.server, claims):
+        return refused
     for entry in scope:
         if entry["server"] != req.server or req.tool not in entry["tools"]:
             continue
@@ -127,7 +132,7 @@ class Gateway:
     def __init__(self, registry, status_lists: dict[str, str], step_up_patterns: list[str] | None = None):
         self.registry = registry
         self.status_lists = status_lists
-        self.step_up = step_up_patterns or ["*.write", "*.draft"]
+        self.step_up = step_up_patterns or ["*.write", "*.draft", "special.*"]
         self._seen_nonces: set[str] = set()
 
     def decide(self, req: Request) -> Decision:
@@ -144,7 +149,7 @@ class Gateway:
                 raise Reject("POP_FAILED", f"bad signature for jkt {jwk_thumbprint(jwk)}")
             self._seen_nonces.add(req.nonce)
 
-            decision, code, detail = check_request(req, claims["scope"], claims["deny"], self.step_up)
+            decision, code, detail = check_request(req, claims["scope"], claims["deny"], self.step_up, claims)
             return Decision(decision, code, agent_id=claims["agent_id"], detail=detail, **base)
         except Reject as r:
             return Decision("DENY", r.code, agent_id=None, detail=r.detail, **base)

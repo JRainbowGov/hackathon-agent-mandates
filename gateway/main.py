@@ -19,6 +19,7 @@ from pydantic import BaseModel
 from gateway.cli import sign_request
 from gateway.lib.common import generate_keypair, pub_to_jwk
 from gateway.lib.gateway_verify import Gateway, Request
+from gateway.lib.interfaces import SERVER_LEVELS
 from gateway.lib.trust_registry import TrustedList
 
 STATE_DIR = Path(os.environ.get("GATEWAY_STATE_DIR", "gateway/state"))
@@ -81,6 +82,8 @@ async def describe() -> dict:
     )
     return {
         "servers": servers,
+        # data level per server (1 public .. 4 special category); a mandate's clearance must cover it
+        "server_levels": {name: SERVER_LEVELS.get(name) for name in servers},
         "step_up_patterns": state["gateway"].step_up,
         "signing": {
             "alg": "Ed25519 by the key in the mandate's cnf.jwk; sig is base64url without padding",

@@ -90,6 +90,12 @@
       "type": "string",
       "description": "RFC 7638 thumbprint of cnf.jwk, or any stable id"
     },
+    "clearance": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4,
+      "description": "Highest data level this mandate may call (1 public, 2 basic PII, 3 sensitive PII, 4 special category). Checked by gateway/lib/interfaces.py against each server's level. Absent: no check on pupil-data, CLEARANCE_MISSING on interface servers."
+    },
     "purpose": {
       "type": "string",
       "maxLength": 500

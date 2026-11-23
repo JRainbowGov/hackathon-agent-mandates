@@ -56,7 +56,7 @@ attack_mandates:  ## Day 2: issue the default mandate, and a feature mandate if 
 
 test:
 	cd mcp_server && uv sync --group dev --extra fastapi --extra synth && uv run python -m pytest --cov=mcp_server -v --cov-report=term-missing --cov-fail-under=0
-	uv run python -m pytest gateway/tests
+	uv run python -m pytest gateway/tests data_slices/tests
 
 .PHONY: lint
 lint:  ## Check code formatting & linting
