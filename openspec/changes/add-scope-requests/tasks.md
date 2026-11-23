@@ -1,7 +1,7 @@
 ## 1. Prerequisites
 
-- [ ] 1.1 Rebase `feature/scope-requests` onto main after `add-audit-trail` and the question 3–5 fixes are merged; verify `gateway/lib/audit.py` (with `record_external`, `history`) and `Gateway.decide_with_context` exist, and `make eval_run` is 32/32
-- [ ] 1.2 Agree three things with the audit workstream: (a) `decision_id` is assigned before forwarding; (b) results of `grants` and `audit` are scored at their server level, not as unlisted level-4 columns; (c) `record_external` accepts the issuer's signed approval events. Verify by a dated note in this change's design or their PR for each
+- [ ] 1.1 Before starting, rebase again onto the latest `ihor` (first rebased 23 Nov onto the audit trail and the question 3–5 fixes); verify `gateway/lib/audit.py` has `record_external` and `Gateway.decide_with_context` exists, and `make eval_run` is 32/32
+- [ ] 1.2 Agree two things with the audit workstream: (a) results of `grants` and `audit` are scored at their server level, not as level-4 flat dicts; (b) the issuer's signed approval events reach `record_external` through the gateway's internal endpoint. Verify by a dated note in this change's design or their PR for each. (`decision_id` before forwarding is already done.)
 - [ ] 1.3 Agree with the access-config workstream that `/demo/*` moves behind the issuer service and an env flag; verify by a note naming who lands it
 - [ ] 1.4 After the rebase, re-copy the "Every server has a data level" and "Every special call is held for approval" requirements from main's `openspec/specs/mandate-clearance/spec.md` into this change's delta and re-apply only this change's edits (`grants` 1, the pre-approval exception); verify `openspec validate add-scope-requests --strict` passes and the delta keeps every scenario main has
 
@@ -14,7 +14,7 @@
 
 - [ ] 3.1 Create `gateway/lib/tool_grant.py` with `mint` and `verify` (typ `tool-grant+jwt`, EdDSA by `tool_grant_key.pem`, claims per spec, 30 s expiry, 5 s skew) and `cli init` generating the key; verify unit tests for a valid grant and for each refusal reason (`GRANT_INVALID`, `GRANT_EXPIRED`, `GRANT_MISMATCH` on changed args, tool or `aud`)
 - [ ] 3.2 Derive grants only from verified claims and the matched entry (`urns` from the `urn` constraint, `pupils` from `audience`, `level` = min(server level, clearance), `max_rows` default 100), with `jti` = `decision_id`; verify a unit test that an extra `urn` or `clearance` argument doesn't change the grant
-- [ ] 3.3 Send the grant from `tools_call` with `StreamableHttpTransport(url, headers={"X-Tool-Grant": ...})` for URL targets only; verify a gateway test with a stub HTTP server that receives the header and an in-process test that still works without it
+- [ ] 3.3 Pass `decision_id` into `_forward` and send the grant with `StreamableHttpTransport(url, headers={"X-Tool-Grant": ...})` for URL targets only; verify a gateway test with a stub HTTP server that receives the header and an in-process test that still works without it
 - [ ] 3.4 Add the grant-verifying middleware, a `check_args` helper (arguments against subjects and constraints, giving `GRANT_SCOPE`) and an `enforce` helper (subjects, level, `max_rows`) with a seen-`jti` set, to `mcp_server`; pass `initialize` and `tools/list` through, behind `TOOL_GRANTS=enforce|off` with no default. Verify that `curl` to `:8080/mcp/` with a `tools/call` returns `GRANT_MISSING`, that `GET /describe` still lists tools, and that `make test` passes
 - [ ] 3.5 Apply `enforce` in every `pupil-data` tool's output (`search`, `get`, `aggregate`, `roster`, `pupil`, `draft`, `write`, `classification`); verify a test per tool that a grant for `SCH01` returns no `SCH02` data even when the arguments ask for it
 - [ ] 3.6 Add the same middleware, `check_args` and `enforce` to the three slices; verify a test that `directory.roster` with a grant whose `subjects.pupils` is `["P0011","P0042"]` returns only those two, and that a grant for `SCH04` with `urn="SCH02"` in the arguments returns `GRANT_SCOPE`
@@ -22,7 +22,7 @@
 
 ## 4. Issuer service
 
-- [ ] 4.1 Create `issuer/` (FastAPI, Dockerfile, Compose service) mounting `issuer_key.pem`, `status_list.json`, `principals.json`, `approvers.json` and `requests.db`, and publishing `status_list.jwt` to a volume the gateway reads; verify `make hack` brings it up healthy and `cli revoke` still takes effect on the next gateway call
+- [ ] 4.1 Create `issuer/` (FastAPI JSON API only, Dockerfile, Compose service) mounting `issuer_key.pem`, `status_list.json`, `principals.json`, `approvers.json` and `requests.db`, and publishing `status_list.jwt` to a volume the gateway reads; verify `make hack` brings it up healthy and `cli revoke` still takes effect on the next gateway call
 - [ ] 4.2 Remove the issuer private key from the gateway mount (mount only `trusted_list.json`, `status_list.jwt`, `tool_grant_key.pem` and the audit key); verify `docker compose exec gateway ls /app/gateway/state` shows no `issuer_key.pem` and the eval still passes
 - [ ] 4.3 Implement the request store (SQLite; create, get, pending count, requests in the last hour, identical recent rejection, single-decision conditional update, expiry sweep); verify unit tests for one decision only, expiry after 15 minutes, and each throttle count
 - [ ] 4.4 Implement `POST /requests` and the supervisor-decision endpoint so the issuer re-verifies every forwarded signed body itself (its own signature on the mandate, dates, revocation, the agent's or supervisor's request signature, its own nonce set). Mint only on a person decision verified with the approver key or a supervisor decision verified the same way, re-check the principal ceiling, and mint per the spec (same `cnf`, `parent`, `approved_by`, `preapproved` with 5-minute expiry, exp ≤ parent). Verify the "gateway can't mint on its own", "forged requester", "same key, only the new grant" and "never outlives the parent" scenarios
@@ -41,8 +41,10 @@
 ## 6. Parent, pre-approval and approval page
 
 - [ ] 6.1 Add the `parent` revocation check to `verify_mandate` (`PARENT_REVOKED`, `STATUS_UNAVAILABLE`); verify the parent-revoked scenario
-- [ ] 6.2 Add `action_hash` and the pre-approved step-up exception, with single use recorded in a `preapproval_uses` table (Postgres when configured, otherwise memory) under a unique key before forwarding; verify the "correction approved and applied once", "different arguments are held" and "pre-approved special record released once" scenarios, and a restart test with Postgres
-- [ ] 6.3 Build the approval page on the issuer service (summary, user code, current versus requested, lifetime, agent ID, the held call's arguments in plain words, escaped and labelled reason, level-4 marking, approve, reject and narrow form, session from the login link); verify the "opening the URL is not approving", "agent's reason is not trusted text", "held correction shown in full" and "approving less" scenarios with HTTP tests
+- [ ] 6.2 Add `action_hash` and the pre-approved step-up exception, with single use recorded in a `preapproval_uses` table (SQLite at `GATEWAY_STATE_DB` on the `gateway-audit` volume, otherwise memory) under a unique key before forwarding; verify the "correction approved and applied once", "different arguments are held" and "pre-approved special record released once" scenarios, and a restart test with the SQLite file
+- [ ] 6.3 Add the issuer's JSON endpoints for the page: request view (summary, user code, current versus requested, lifetime, agent ID, the held call's arguments in plain words, the reason, level-4 marks), approver login from the one-time token (session cookie), and decision (approve, reject, narrow). Verify HTTP tests for the "opening the URL is not approving", "signed-in UI user who isn't the approver" and "approving less" scenarios
+- [ ] 6.4 In `frontend/`, add `src/pages/approve/[id].astro` with `ApprovalRequest.svelte`, `src/pages/approve/login.astro`, and the proxy `src/pages/api/approve/[...path].ts` (relaying the HTTP-only, `SameSite=Strict` session cookie scoped to `/approve`); render the reason with text interpolation only. Verify with `npm run build`, a browser check that a request shows its summary, user code and literal `<b>URGENT</b>` reason ("agent's reason is not trusted text", "held correction shown in full", "approval URL opens the UI"), and that approving from the CLI login link works end to end
+- [ ] 6.5 Set `FRONTEND_URL` for the issuer and the gateway so `approval_url` points at the UI; verify a created request's `approval_url` opens the page on `:8081`
 
 ## 7. Agent client and docs
 
@@ -54,5 +56,5 @@
 
 - [ ] 8.1 `make eval_run` gives 32/32 with `TOOL_GRANTS=enforce`, and question 0 at 12/12
 - [ ] 8.2 `make test` passes, including the new gateway, issuer, grant and slices tests
-- [ ] 8.3 `make lint` passes
+- [ ] 8.3 `make lint` passes, and `npm run lint` and `npm run build` pass in `frontend/`
 - [ ] 8.4 `docker compose up -d --build`, then a Day 2 dry run: a forged approval, a URL-only approval, a direct `:8080` call and a replayed tool grant are each refused, and `audit.events` shows the request, the approval and the retried call

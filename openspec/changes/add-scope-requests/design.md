@@ -4,15 +4,16 @@
 - The MCP server on `:8080` is published to the host and has no access control. The slices container has no published port but trusts every caller on the Compose network.
 - `gateway/state/` holds the issuer private key. It is mounted into the gateway, and `/demo/mandate` and `/demo/revoke` use it with no login.
 - STEP_UP is final today. `special.*` and `*.write` or `*.draft` calls are held and can never be released.
-- `add-audit-trail` (in flight on `feature/audit-trail`) adds:
-  - a `decision_id` per call;
-  - `record_external(event_type, jti, ...)` for approval events;
-  - `history(jti)`, built from verified events;
-  - an `AuditContext` from `Gateway.decide_with_context`;
-  - a `MANDATE_MALFORMED` catch-all;
-  - the pattern of a gateway-handled server (`audit`) reached through `POST /tools/call`.
-
-  This change builds on all of these.
+- **The audit trail is implemented on `ihor`** (`gateway/lib/audit.py`, as of 23 Nov). It provides:
+  - **Storage:** a SQLite store at `GATEWAY_AUDIT_DB` on the `gateway-audit` volume, or memory without it. Postgres isn't available where we deploy.
+  - **`decision_id`:** `tools_call` assigns it right after `decide_with_context` and before `_forward`.
+  - **`_forward(body)`:** dispatches `server == "audit"` in process, and everything else to `Client(target)`.
+  - **`record_external(event_type, jti, server, tool, ref_decision_id, reason_code, principal, agent_id)`:** accepts only the four `APPROVAL_EVENTS`.
+  - **`history(jti)`:** built from verified decision events.
+  - **`MANDATE_MALFORMED`:** the catch-all.
+  - **`summarise(data)`:** scores a flat dict whose keys aren't manifest columns as level 4. A document (nested values) scores level 1, or 2 with pupil IDs.
+- **The question 3–5 fixes are in `check_request`:** any matching entry is tried; `path` is compared after `normpath`; `limit` must be an integer from 0 to `MAX_ROWS = 100`; a blank `search` query is refused. The reason code for the last two is `TOO_MUCH`.
+- **`frontend/`** (Astro 7, Svelte 5, Node adapter, GOV.UK styles) has a demo page and a server-side proxy, `src/pages/api/demo/[...path].ts`, so the browser never calls the gateway. Its middleware uses the i.AI Auth API, from the `x-amzn-oidc-data` header, outside local. Organisers approved changes to `frontend/` on 23 Nov.
 - fastmcp 4.2.3's `StreamableHttpTransport(url, headers=...)` sends extra HTTP headers, so the grant can travel without changing the tool arguments.
 - Requirements: `specs/scope-requests`, `specs/tool-grants`, `specs/mandate-audience`, and the `mandate-clearance` delta.
 
@@ -52,7 +53,7 @@ It verifies the mandate claims the agent presented, then runs the same `check_re
 New container `issuer` (FastAPI), mounting `issuer_key.pem`, `status_list.json` and the principals and approvers files. It serves:
 - `POST /requests` and `POST /requests/{id}/supervisor-decision`: internal only. The gateway forwards the agent's or supervisor's signed call bodies unchanged.
 - `GET /requests/{id}`: status, and the minted mandate once approved.
-- `GET /approve/{id}`, `POST /approve/{id}/login` and `POST /approve/{id}/decision`: the approval page.
+- `GET /requests/{id}/view`, `POST /approver/login` and `POST /requests/{id}/decision`: JSON endpoints for the approval page in `frontend/`. No HTML is served by the issuer (decision 5a).
 - `POST /revoke`.
 - The status list, `status_list.jwt`, which it writes to a shared read-only volume the gateway reads as today.
 
@@ -67,10 +68,10 @@ The gateway's mount shrinks to `trusted_list.json`, `status_list.jwt`, `tool_gra
 
 ### 4. Where requests live
 Scope requests are a small table in the issuer service: `id`, `requester_jti`, `requester_agent_id`, `principal`, the requested grant (canonical JSON), the reason, `user_code`, `created`, `expires`, `status`, `decided_by`, `minted_jti`. It lives in SQLite at `issuer/state/requests.db`, because the issuer must survive alone, and SQLite gives one-decision-only through a `status='pending'` conditional update. The gateway calls the issuer over the Compose network for create, status and decide. Request throttling (pending count, requests per hour, identical recent rejection) reads this table, not `history(jti)`, which has no such counts.
-- *Alternative:* the dev scaffold's Postgres. Deferred: it's optional, and the base stack must work without it.
+- *Alternative:* Postgres. Not available where we deploy (the same reason the audit trail uses SQLite).
 
 ### 4a. Issuer events reach the audit chain
-`record_external` runs inside the gateway, but a person's decision happens on the issuer. So the issuer signs each event (`approval_requested`, `approval_granted`, `approval_denied`, `approval_expired`, refused decisions) with its issuer key. It posts them to an internal gateway endpoint, `POST /internal/audit-events`, reachable only on the Compose network. The gateway verifies the issuer signature against `trusted_list.json` and calls `record_external`.
+`record_external` runs inside the gateway, but a person's decision happens on the issuer. So the issuer signs each event (`approval_requested`, `approval_granted`, `approval_denied`, `approval_expired`, the four types `record_external` accepts) with its issuer key. A person's refused decision isn't one of these, so it stays in the issuer's request log. A supervisor's refused `grants.decide` is audited as that call's own event. It posts them to an internal gateway endpoint, `POST /internal/audit-events`, reachable only on the Compose network. The gateway verifies the issuer signature against `trusted_list.json` and calls `record_external`.
 - The issuer keeps an outbox in SQLite and retries until the gateway acknowledges the event. Events reach the chain even if the agent never polls.
 - An unsigned or wrongly signed post is refused, so nobody else can write approval history.
 - *Alternative:* the issuer writes to the audit store directly. Rejected: two writers to one hash chain, and the audit change owns the store.
@@ -83,6 +84,19 @@ Scope requests are a small table in the issuer service: `id`, `requester_jti`, `
 The agent never holds an approver key. URL and user code are only identifiers.
 - *Alternative:* WebAuthn passkeys. They're the right production answer, but too much for Day 1. The flow stays the same when they replace the key.
 - *Alternative:* trust the network or a shared password. Rejected: it reproduces `/demo/mandate`.
+
+### 5a. The approval page lives in `frontend/`, with no authority
+- **Pages:**
+  - `src/pages/approve/[id].astro`, with a Svelte component `ApprovalRequest.svelte`;
+  - `src/pages/approve/login.astro`, which takes the one-time login token from the CLI link.
+- **Proxy:** `src/pages/api/approve/[...path].ts` forwards to the issuer, mirroring `api/demo/[...path].ts`. It relays the issuer's approver-session cookie as an HTTP-only, `SameSite=Strict` cookie on the UI origin, scoped to `/approve`. The browser never calls the issuer.
+- **`approval_url`** is `${FRONTEND_URL}/approve/{id}`.
+- **Reason text** is rendered with Svelte text interpolation only (escaped), never `{@html}`. The summary and argument wording come from the issuer's view JSON.
+- **The UI decides nothing.** Its Approve, Reject and Narrow buttons post to the issuer, which checks the approver session and the ceiling.
+  - Where the UI's own i.AI sign-in is active, it's an extra gate on the page, not approver authentication.
+  - Approval pages are excluded from the UI's public paths, so its sign-in still applies when configured.
+- *Why the frontend:* it already has the proxy pattern, GOV.UK styling and a sign-in layer, and organisers allowed changing it. The issuer stays an API with a small attack surface.
+- *Alternative:* HTML served by the issuer. Rejected now that the UI can change: two web surfaces to secure instead of one.
 
 ### 6. The principal ceiling
 `issuer/state/principals.json` maps principal → {servers, tools, urns, max clearance}. It is checked at request time, so the agent sees `EXCEEDS_PRINCIPAL` immediately, and again at mint time, in case the file changed. A principal with no entry has no ceiling to grant from, and every request is refused. This is the hackathon stand-in for a real entitlement source (question 13).
@@ -109,7 +123,7 @@ The agent never holds an approver key. URL and user code are only identifiers.
 ### 8. Action hash for held calls
 `action_hash = sha256(canonical({server, tool, arguments, mandate_hash: parent_mandate_hash}))`. Unlike `request_hash`, it leaves out the nonce and `ts`. That is the Codex finding that approval couldn't replay the held request.
 - **The audit trail never stores argument values, so the request carries them again.** `grants.request` for a held call sends the `decision_id` plus server, tool and full arguments. The gateway checks them against the held event: same mandate, decision `STEP_UP`, same server and tool, and the same argument hash. The approval page shows the arguments in plain words, and the issuer computes the `action_hash` from them.
-- **Single use is the gateway's own record, not audit history.** `history(jti)` has no lookup by action hash. A small `preapproval_uses(jti, action_hash, decision_id)` table is in Postgres when configured (scaffold), otherwise in memory. It is written, under a unique key, before the call is forwarded.
+- **Single use is the gateway's own record, not audit history.** `history(jti)` has no lookup by action hash. A small `preapproval_uses(jti, action_hash, decision_id)` table lives in a gateway SQLite file next to the audit database, on the same `gateway-audit` volume (`GATEWAY_STATE_DB`), otherwise in memory. It is written, under a unique key, before the call is forwarded.
 - A pre-approved mandate also expires 5 minutes after approval, which bounds the damage if the memory store loses a use on restart.
 
 ### 9. Tool grant mint and verify live in one shared module
@@ -138,19 +152,18 @@ Different keys and different JWT `typ` values mean one leaked key doesn't mint a
 The gateway's `AUDIENCE_VIOLATED` check covers argument-named pupils. Pupils that appear only in results (`search`, `roster`) are left to the tool, through `subjects.pupils` in the grant. The gateway then summarises the filtered result for audit, as `add-audit-trail` already does. So the audit event records what really left, not what the server would have sent.
 
 ### 12. Fitting `add-audit-trail`
-This change assumes the audit change lands first, and uses:
-- `decision_id` assigned before forwarding, as the tool grant's `jti`;
+The audit change is now on `ihor`. This change uses:
+- `decision_id`, as the tool grant's `jti`. It's already assigned before forwarding; `_forward` only needs it passed in;
 - `record_external` for `approval_*` events, fed by the issuer through decision 4a;
 - the held call's audit event (server, tool, argument hash, decision), to validate a request about a held call;
 - `decide_with_context` for verified claims;
 - the `MANDATE_MALFORMED` catch-all, unchanged.
 
-Three asks for the audit workstream (task 1.2):
-- **Assign `decision_id` before forwarding,** not only when writing the event.
-- **Score results by server level.** Their summariser counts unlisted columns as level 4, so every `grants.*` result would raise the calling mandate's "highest PII level seen". `grants` and `audit` results should be scored at their server's level.
-- **Accept the issuer's events**, which arrive through `record_external` with an issuer signature.
+Two asks remain for the audit workstream (task 1.2). The third, `decision_id` before forwarding, is already done.
+- **Score results by server level.** `summarise` counts a flat dict with non-manifest keys as level 4. A `grants.status` result `{request_id, status, summary}` therefore scores 4 (checked 23 Nov) and would raise the mandate's highest PII level seen. `grants` and `audit` results should be scored at their server's level.
+- **Accept the issuer's events.** They reach `record_external` from the gateway's internal endpoint, after the gateway has checked the issuer signature.
 
-Throttling and single use do not use `history(jti)`; it lacks the counts they need. If the audit change slips, tasks 1.x stop. Nothing here writes its own log.
+Throttling and single use don't use `history(jti)`; it lacks the counts they need. Nothing here writes its own audit log.
 
 ## Risks / Trade-offs
 
@@ -158,7 +171,8 @@ Throttling and single use do not use `history(jti)`; it lacks the counts they ne
 - [Social engineering through the agent's reason] → The summary is gateway-generated; the reason is escaped and labelled; level-4 data is marked; requests are throttled and repeats after a rejection are refused.
 - [Grants add latency and a failure mode: a clock skew between containers breaks calls] → Grants live 30 s; all containers share the host clock; verification allows 5 s of skew; failures name the reason.
 - [The server-side filter changes results for claim-less mandates] → The grant derives from the same entry the gateway matched. A parity test runs the full eval with grants enforced and compares rows. The `max_rows` default of 100 matches the server's own default.
-- [Both the jacob branch and this change edit `check_request`] → Rebase onto the merged question 3–5 fix before starting tasks 3.x.
+- [This change edits `check_request` after the question 3–5 fixes] → Rebased onto `ihor` on 23 Nov. Audience slots in after the "any one entry accepts every argument" loop, and `TOO_MUCH` stays the bulk reason.
+- [The approval page adds a web surface (cookies, cross-site requests)] → The session cookie is HTTP-only, `SameSite=Strict` and path-scoped. Decisions are POST-only and carry the request's user code. The issuer re-verifies everything.
 - [The audit table's argument-hash slot is needed for `action_hash`] → Agree it in task 1.2, or add one optional field in the audit change.
 - [`grants` sits at level 1, so mandates without `clearance` (the eval, the Day 2 default, `make gateway_issue`) can't introspect or ask for more] → Intended: legacy mandates behave as before. Agents that should escalate get a mandate with `clearance`. The docs and the shim's setup issue one.
 - [The `mandate-clearance` delta copies a requirement that `add-audit-trail` also modifies] → Re-copy it from main after the rebase (task 1.4), keeping both changes' entries and scenarios.
@@ -167,7 +181,7 @@ Throttling and single use do not use `history(jti)`; it lacks the counts they ne
 
 ## Migration Plan
 
-1. Land `add-audit-trail` and the question 3–5 fixes on main; rebase this branch.
+1. Done 23 Nov: rebased onto `ihor`, which has the audit trail and the question 3–5 fixes.
 2. Add the issuer container and move the issuer key out of the gateway mount. `make hack` initialises both state folders. The CLI keeps writing the shared files, so `make gateway_issue` and `make attack_mandates` are unchanged.
 3. Turn on tool grants in Compose (`TOOL_GRANTS=enforce`) after the parity test passes.
 4. Rollback: set `TOOL_GRANTS=off` and remove the `issuer` service from Compose. Existing mandates keep working. Supplementary mandates stop being minted, and the ones already issued expire within their TTL.

@@ -12,7 +12,7 @@ context: |
   - Gateway (FastAPI, :8082, gateway/main.py): POST /tools/call -> verify -> forward to MCP.
     All decisions live in gateway/lib/gateway_verify.py (verify_mandate, check_request, Gateway.decide).
   - Issuer and CLI: gateway/cli.py, gateway/lib/mandate_issuer.py, trust_registry.py, status_list.py.
-  - Demo UI (Astro/Svelte, :8081, frontend/): teaching only.
+  - Team UI (Astro/Svelte, :8081, frontend/): the demo walkthrough plus team pages such as approvals; reaches backends only through its server-side proxies.
 
   Mandate: EdDSA JWT, typ mandate+jwt. Claims: iss, jti, exp, cnf.jwk (agent key), agent_id, delegator,
   purpose, scope [{server, tools, constraints}], deny (globs), status.status_list {uri, idx}.
@@ -33,7 +33,8 @@ context: |
   Hard rules from the organisers:
   - Keep the POST /tools/call request shape unchanged; other teams and the eval depend on it.
   - Question 0 must keep passing; run make eval_run, make test, make lint before finishing.
-  - Do not change mcp_server/data/synthetic/, mcp_server/synth/ or frontend/.
+  - Do not change mcp_server/data/synthetic/ or mcp_server/synth/.
+  - frontend/ may be changed (organisers approved on 2026-11-23), e.g. to add the approval page; keep the demo walkthrough working.
   - A mandate cannot be edited: issue a new one and revoke the old one.
   - Never commit gateway/state/*.pem or eval_pack/; share only public keys and mandates.
   - Going straight to :8080 bypasses the gateway; it is a known hole, not a way to pass a question.

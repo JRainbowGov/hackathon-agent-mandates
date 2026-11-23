@@ -14,7 +14,7 @@ An agent that finds its mandate too narrow has no way to ask for more. A held ca
   - refuses it if it goes beyond what the person behind the mandate may hold;
   - otherwise creates a pending request with an ID, an approval URL, a short user code, a challenge for a supervising agent, and an expiry.
 - **Approval by a person or a supervising agent.**
-  - **A person** approves on an approval page. The page shows a description the gateway generates from the structured request, and the agent's reason labelled as the agent's own words. The approval must be authenticated by the person's approver key; holding the URL is not enough.
+  - **A person** approves on an approval page in the team's UI (`frontend/`, which organisers approved us changing on 23 Nov). The page shows a description the gateway generates from the structured request, and the agent's reason labelled as the agent's own words. The page holds no authority: the approval must be authenticated by the person's approver key, and the issuer verifies it. Holding the URL is not enough.
   - **A supervising agent** can approve only what its own mandate covers, and only if that mandate allows delegation. Anything wider goes to the person.
   - Either approver can reject, or approve something narrower than was asked. Pending requests expire.
 - **An issuer service mints the result.** A separate issuer service, which alone holds the issuer key, mints a **supplementary mandate** for the same agent key. It contains exactly the approved grant, points to its parent, expires no later than the parent, and stops working when the parent is revoked.
@@ -56,12 +56,15 @@ An agent that finds its mandate too narrow has no way to ask for more. A held ca
 
 ## Impact
 
-- **Depends on** `add-audit-trail`: `decision_id` assigned before forwarding, `record_external`, the held call's audit event, the `MANDATE_MALFORMED` catch-all and the gateway-handled server pattern. Also on `add-interface-slices` (merged), and on the question 3–5 fixes in `check_request` (jacob's branch), which `grants.check` reuses.
+- **Built on** (all on `ihor` as of 23 Nov):
+  - `add-audit-trail` (implemented with a SQLite store): `decision_id` assigned before forwarding, `record_external`, the held call's audit event, the `MANDATE_MALFORMED` catch-all, and the gateway-handled server pattern;
+  - `add-interface-slices`;
+  - the question 3–5 fixes in `check_request` (`TOO_MUCH`, `MAX_ROWS = 100`, path normalisation, any matching entry), which `grants.check` reuses.
 - **New code:**
   - `gateway/lib/grants.py`: the `grants` server, request store, approval logic.
   - `gateway/lib/tool_grant.py`: mint and verify, shared by the gateway and the servers.
   - `issuer/`: a new service and container that holds `issuer_key.pem`, mints supplementary mandates and publishes the status list.
-  - An approval page served by the issuer service.
+  - `frontend/`: an approval page (`/approve/[id]`), an approver login page, and a server-side proxy to the issuer, like the existing demo proxy. The browser never talks to the issuer directly.
 - **Changed code:**
   - `gateway/lib/gateway_verify.py`: audience, parent revocation, pre-approved actions.
   - `gateway/lib/interfaces.py`: `grants` level.
@@ -73,7 +76,7 @@ An agent that finds its mandate too narrow has no way to ask for more. A held ca
   - A new `tool_grant_key.pem` on the gateway, used for tool grants only. No key authenticates the gateway to the issuer; the issuer re-verifies the signed bodies instead.
   - Approver public keys registered with the issuer.
   - The gateway no longer holds `issuer_key.pem`.
-- **API:** `POST /tools/call`'s request shape is unchanged. New issuer endpoints: the approval page and its login and decision posts, plus internal request endpoints. New gateway endpoint: an internal endpoint for signed issuer audit events. The MCP servers now require a grant header on HTTP tool calls.
+- **API:** `POST /tools/call`'s request shape is unchanged. New issuer endpoints: JSON endpoints for viewing a request, approver login and decisions (called through the frontend's proxy), plus internal request endpoints. New frontend pages: `/approve/[id]` and `/approve/login`. New gateway endpoint: an internal endpoint for signed issuer audit events. The MCP servers now require a grant header on HTTP tool calls.
 - **Mandates without clearance can't use `grants`** (level 1). This includes the eval, the Day 2 default mandate and `make gateway_issue`'s mandate. An agent that should be able to ask for more needs a mandate with `clearance`.
 - **Demo router:** `/demo/mandate` and `/demo/revoke` need the issuer key, so they move behind the issuer service and an env flag. Coordinate this with the access-config workstream, which plans to disable them.
 - **Questions:** 7, 9, 10, 12 (through narrow, purpose-bound grants), 13 (person ceiling), 14 and 16 (approval events). Day 2: closes "a mandate the target mints for you" if approval stays authenticated, and the issuer key leaves the gateway.

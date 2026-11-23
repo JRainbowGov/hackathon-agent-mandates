@@ -123,6 +123,17 @@ A decision for a person SHALL be accepted only when it is authenticated by an ap
 - **WHEN** `officer:priya`'s approver key approves a request from a mandate delegated by `officer:jsmith`
 - **THEN** the decision is refused and the request stays pending
 
+### Requirement: The approval page is in the team UI and holds no authority
+The approval page SHALL be served by the team's UI (the frontend on `:8081`), and `approval_url` SHALL point there. The UI SHALL reach the issuer service only through its own server, never from the browser. The UI MUST NOT decide anything itself: every approval, rejection or narrowing it submits SHALL be verified by the issuer against the person's approver key or approver session. The UI's own sign-in, where one is configured, SHALL NOT count as approver authentication.
+
+#### Scenario: Signed-in UI user who isn't the approver
+- **WHEN** a person signed in to the UI, with no approver session for the request's principal, opens an `approval_url` and submits Approve
+- **THEN** the issuer refuses the decision and the request stays pending
+
+#### Scenario: Approval URL opens the UI
+- **WHEN** a scope request is created
+- **THEN** its `approval_url` is a page on the team UI that shows the request's summary and user code
+
 ### Requirement: The approval page shows what will be granted, not what the agent says
 The approval page SHALL show:
 - the gateway-generated summary;
@@ -221,7 +232,7 @@ When a request about a held call is approved, the minted mandate SHALL carry a `
 - decide it on every other check;
 - record the pre-approval as used before forwarding.
 
-Any other call SHALL be held as before. The record of used pre-approvals SHALL survive a gateway restart when a database is configured.
+Any other call SHALL be held as before. The record of used pre-approvals SHALL survive a gateway restart whenever the audit store is durable.
 
 #### Scenario: Correction approved and applied once
 - **WHEN** `pupil-data.write(pupil_id="P0011", urn="SCH04", column="FSMeligible", value="1", reason="...")` was held, the person approved a request naming its `decision_id`, and the agent retries the same call with the minted mandate
@@ -245,7 +256,11 @@ The gateway and issuer service SHALL record these events into the audit hash cha
 - `approval_denied`, naming the approver;
 - `approval_expired`.
 
-A decision that is refused (wrong key, already decided, beyond the supervisor) SHALL also be recorded. Events that happen on the issuer service, such as a person's decision, SHALL reach the same chain even if the agent never polls again.
+Events that happen on the issuer service, such as a person's decision, SHALL reach the same chain even if the agent never polls again.
+
+A refused decision SHALL also leave a record:
+- a supervisor's refused `grants.decide` is recorded as that call's own audit event;
+- a person's refused decision (wrong key, no session, already decided) is recorded in the issuer's request log with its reason.
 
 #### Scenario: Person can see who approved
 - **WHEN** a request is approved by `officer:jsmith` and the minted mandate is used once
