@@ -28,5 +28,5 @@
 
 - [x] 5.1 Run `make eval_run` and verify question 0 is 12/12 and the tally is unchanged at 27/32
 - [x] 5.2 Run `make test` and verify the new and existing tests pass
-- [ ] 5.3 Run `make lint` and verify it passes
+- [x] 5.3 Run `make lint` and verify it passes
 - [x] 5.4 Rebuild with `docker compose up -d --build gateway slices` and verify the spec scenarios against `:8082` with `cli call`
