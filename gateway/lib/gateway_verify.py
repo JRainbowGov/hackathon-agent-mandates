@@ -22,6 +22,9 @@ from .status_list import is_revoked
 
 POLICY_VERSION = "2026-11-18.1"
 CLOCK_SKEW = 30
+# Most rows one call may ask for (the MCP server's own default).
+# shortcut: per call only, many small calls still add up (question 11); add a per-mandate budget for that
+MAX_ROWS = 100
 
 
 class Reject(Exception):
@@ -114,6 +117,11 @@ def check_request(req: Request, scope: list[dict], deny: list[str], step_up_patt
                 return "DENY", "CONSTRAINT_MISSING", k
             if str(req.arguments[k]) not in set(map(str, allowed)):
                 return "DENY", "CONSTRAINT_VIOLATED", f"{k}={req.arguments[k]!r}"
+        limit = req.arguments.get("limit", MAX_ROWS)
+        if type(limit) is not int or not 0 <= limit <= MAX_ROWS:
+            return "DENY", "TOO_MUCH", f"limit={limit!r}, at most {MAX_ROWS}"
+        if req.tool == "search" and not str(req.arguments.get("query", "")).strip():
+            return "DENY", "TOO_MUCH", "empty query matches every row"
         for pat in step_up_patterns:
             if fnmatch.fnmatch(name, pat):
                 return "STEP_UP", "SENSITIVE_TOOL", pat

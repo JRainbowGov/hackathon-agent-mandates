@@ -52,6 +52,22 @@ def test_allow_deny_replay_revoke(gw):
     assert (r.status_code, r.json()["decision"]["reason_code"]) == (403, "REVOKED")
 
 
+def test_bulk_export_is_denied(gw):
+    client, call, _ = gw
+    for arguments in (
+        {"query": ""},
+        {"query": "  "},
+        {"query": "SPR", "limit": 101},
+        {"query": "SPR", "limit": "5"},
+        {"query": "SPR", "limit": -1},
+        {"query": "SPR", "limit": True},
+    ):
+        r, _ = call(client, "search", urn="SCH01", **arguments)
+        assert (r.status_code, r.json()["decision"]["reason_code"]) == (403, "TOO_MUCH"), arguments
+    r, _ = call(client, "search", urn="SCH01", query="SPR", limit=100)
+    assert r.status_code == 200, r.text
+
+
 def test_tampered_mandate_is_denied(gw):
     client, call, state = gw
     mandate = (state / "mandate.jwt").read_text()
