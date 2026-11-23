@@ -67,7 +67,13 @@ services:
       - "8082:8082"
     volumes:
       - ./gateway/state:/app/gateway/state
+      # PII levels per column, for the audit trail's "what came back" (public metadata, read-only)
+      - ./mcp_server/data/synthetic/synthetic_manifest.json:/app/data/synthetic_manifest.json:ro
+      # the audit trail (SQLite), on its own volume so it outlives the container and stays out of gateway/state
+      - gateway-audit:/app/gateway/audit
     environment:
+      - GATEWAY_MANIFEST_PATH=/app/data/synthetic_manifest.json
+      - GATEWAY_AUDIT_DB=/app/gateway/audit/audit.sqlite
       - MCP_SERVERS=pupil-data=http://backend:8080/mcp/,schools=http://slices:8090/schools/mcp/,directory=http://slices:8090/directory/mcp/,special=http://slices:8090/special/mcp/
       - GATEWAY_STATE_DIR=/app/gateway/state
       - LITELLM_KEY=${LITELLM_KEY:-}
@@ -85,6 +91,9 @@ services:
         condition: service_healthy
       slices:
         condition: service_healthy
+
+volumes:
+  gateway-audit:
 
 networks:
   agent-mandate-hack-network:

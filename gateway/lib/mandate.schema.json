@@ -94,7 +94,7 @@
       "type": "integer",
       "minimum": 1,
       "maximum": 4,
-      "description": "Highest data level this mandate may call (1 public, 2 basic PII, 3 sensitive PII, 4 special category). Checked by gateway/lib/interfaces.py against each server's level. Absent: no check on pupil-data, CLEARANCE_MISSING on interface servers."
+      "description": "Highest data level this mandate may call (1 public, 2 basic PII, 3 sensitive PII, 4 special category). Checked by gateway/lib/interfaces.py against each server's level. Absent: no check on pupil-data, CLEARANCE_MISSING on interface servers. The 'audit' server is level 2."
     },
     "purpose": {
       "type": "string",
@@ -130,7 +130,8 @@
             }
           }
         }
-      }
+      },
+      "description": "Grants, one per entry. An audit-reader mandate uses server 'audit' (answered by the gateway itself, data level 2, so it needs clearance >= 2): {\"server\": \"audit\", \"tools\": [\"events\", \"saw\"], \"constraints\": {\"principal\": [\"officer:jsmith\"]}} or constraints {\"jti\": [...]}. See docs/audit-trail.md."
     },
     "deny": {
       "type": "array",

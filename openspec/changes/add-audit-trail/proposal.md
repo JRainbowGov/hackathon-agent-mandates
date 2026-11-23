@@ -11,7 +11,7 @@ The gateway decides every call and remembers none of them (`tools_call` in `gate
 - Reading the audit trail is itself a mandated call: `server: "audit"` through the same `POST /tools/call`, with an issuer-signed audit-reader mandate. A reader sees only events for mandates they are allowed to read. An operational mandate, or a stolen agent key, can't read the log.
 - Two read tools: `audit.events` (the request log, question 16) and `audit.saw` (what a mandate received, question 14, in plain terms).
 - An in-process history API, `record`, `events(jti)` and `history(jti)`, for flow rules and budgets. It also records approval events from the human-in-the-loop workstream.
-- Storage: Postgres from the dev scaffold when `GATEWAY_DATABASE_URL` is set; otherwise an in-memory store, so the base stack, tests and the eval still get a working, non-durable log.
+- Storage: a SQLite file at `GATEWAY_AUDIT_DB` (set in `docker-compose.yaml` on its own named volume), append-only by triggers. Postgres isn't available where we deploy, and SQLite needs no extra service or dependency. Without the variable, an in-memory store, so tests and a bare `uvicorn` still get a working, non-durable log.
 - Fail closed: if the configured store can't write an event, the gateway withholds the result and returns `503` with reason `AUDIT_UNAVAILABLE`. Decisions are otherwise unchanged.
 
 ## Capabilities
@@ -27,14 +27,14 @@ The gateway decides every call and remembers none of them (`tools_call` in `gate
 
 - No change to any ALLOW, STEP_UP or DENY decision, for mandates with or without new claims. Audit only records; budgets, suspensions and flow rules that act on history are separate changes.
 - No approval workflow. The human-in-the-loop workstream owns approvals; this change only accepts their events.
-- No DB-backed nonces, budgets or suspensions, though the scaffold has tables for them.
+- No database-backed nonces, budgets or suspensions.
 - No redaction pipeline or trace export. Events hold IDs and levels, never values.
-- No multi-replica support beyond what Postgres gives for free.
+- No multi-replica support: SQLite has one writer, which suits one gateway container.
 
 ## Impact
 
-- **Depends on** `feature/dev-scaffold` (Postgres schema, `gateway/lib/db.py`) being merged to main first.
+- **No dependency** on the Postgres dev scaffold (PR #2); this change stands alone on main.
 - **Code:** new `gateway/lib/audit.py` (event model, summariser, chain, stores, history API); `gateway/main.py` (record every decision, `decision_id`, the `audit` server, `GET /audit/head`); small hook in `gateway/lib/gateway_verify.py` to expose unverified `jti` and `iss` on early refusals; `gateway/cli.py` (`audit anchor`, `audit verify`, `audit saw`).
-- **DB:** migration `db/init/03_audit_v2.sql` adds columns the scaffold lacks (event type, verified flag, columns returned, result hash, policy version, mandate hash, source address, HTTP status).
+- **Storage:** the SQLite schema lives in `gateway/lib/audit.py` and is created on first open; `docker-compose.yaml` adds the `gateway-audit` volume and `GATEWAY_AUDIT_DB`; the gateway image creates `/app/gateway/audit` owned by its user.
 - **Response:** `decision.decision_id` is a new field. Existing fields and status codes are unchanged, so the eval and other teams' clients are unaffected.
 - **Questions:** 14, 16; inputs for 9, 11, 12. Day 2: "Unseen" bonus; makes the log a target, so reads are mandated and audited.

@@ -59,6 +59,11 @@ frontend/dist/
 # Gateway runtime state (private keys, audit log)
 gateway/state/*
 !gateway/state/.gitkeep
+gateway/audit/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+audit_anchors.jsonl
 
 .pytest_cache/
 .ruff_cache/

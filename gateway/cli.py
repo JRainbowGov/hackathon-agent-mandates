@@ -9,6 +9,8 @@ never do, and until when. The gateway checks the note on every call. The issuer 
     python -m gateway.cli discover --url http://localhost:8082      # agent: see what a gateway offers
     python -m gateway.cli revoke --idx 0                            # issuer: cancel mandate 0
     python -m gateway.cli decode mandate.jwt                        # anyone: read what a mandate says
+    python -m gateway.cli audit anchor --url http://localhost:8082  # anyone: save the audit chain head locally
+    python -m gateway.cli audit saw --mandate reader.jwt --agent-key reader.pem --jti <jti>  # what it received
     python -m gateway.cli call --mandate gateway/state/mandate.jwt --agent-key gateway/state/agent.pem \\
         --server pupil-data --tool search --args '{"query": "P0004", "urn": "SCH01"}'
 
@@ -22,6 +24,7 @@ import secrets
 import sys
 import time
 import urllib.request
+from http import HTTPStatus
 from pathlib import Path
 
 from gateway.lib.common import (
@@ -35,6 +38,7 @@ from gateway.lib.common import (
     pub_to_jwk,
     pub_to_pem,
     sign_bytes,
+    verify_bytes,
 )
 from gateway.lib.gateway_verify import Request
 from gateway.lib.mandate_issuer import MandateIssuer
@@ -212,6 +216,17 @@ def cmd_decode(a) -> None:
     print(json.dumps(json.loads(b64u_decode(payload)), indent=2))
 
 
+def _post(url: str, body: dict) -> tuple[int, dict]:
+    req = urllib.request.Request(  # noqa: S310
+        f"{url}/tools/call", data=json.dumps(body).encode(), headers={"content-type": "application/json"}
+    )
+    try:
+        with urllib.request.urlopen(req) as resp:  # noqa: S310
+            return resp.status, json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read().decode())
+
+
 def cmd_call(a) -> None:
     body = sign_request(
         priv_from_pem(a.agent_key.read_bytes()),
@@ -220,16 +235,103 @@ def cmd_call(a) -> None:
         arguments=json.loads(a.args),
         mandate=a.mandate.read_text().strip(),
     )
-    req = urllib.request.Request(  # noqa: S310
-        f"{a.url}/tools/call", data=json.dumps(body).encode(), headers={"content-type": "application/json"}
-    )
-    try:
-        with urllib.request.urlopen(req) as resp:  # noqa: S310
-            status, text = resp.status, resp.read().decode()
-    except urllib.error.HTTPError as e:
-        status, text = e.code, e.read().decode()
+    status, payload = _post(a.url, body)
     print(status)
-    print(json.dumps(json.loads(text), indent=2))
+    print(json.dumps(payload, indent=2))
+
+
+# ---------------------------------------------------------------- audit trail (docs/audit-trail.md)
+
+
+def cmd_audit_anchor(a) -> None:
+    """Save the gateway's signed chain head on this machine, out of the gateway operator's reach."""
+    with urllib.request.urlopen(f"{a.url}/audit/head") as resp:  # noqa: S310
+        head = json.load(resp)
+    if not verify_bytes(pub_from_pem(a.gateway_pub.read_bytes()), head["event_hash"].encode(), head["sig"]):
+        sys.exit("head signature does not match the gateway key: not saved")
+    with a.out.open("a") as f:
+        f.write(json.dumps({**head, "url": a.url, "saved_at": int(time.time())}) + "\n")
+    print(f"anchored seq {head['seq']} to {a.out}")
+
+
+def cmd_audit_verify(a) -> None:
+    """Recompute every hash and signature in the audit store and check saved anchors."""
+    import asyncio  # noqa: PLC0415
+
+    from gateway.lib import audit  # noqa: PLC0415
+
+    if not a.db or not Path(a.db).exists():
+        sys.exit(f"no audit database at {a.db!r}: pass --db or set {audit.AUDIT_DB_ENV}")
+    store = audit.SqliteStore(None, Path(a.db), read_only=True)
+    try:
+        chain = asyncio.run(store.all_events())
+    finally:
+        store.close()
+    anchors = [json.loads(line) for line in a.anchors.read_text().splitlines() if line.strip()] if a.anchors else []
+    problems = audit.verify_chain(chain, pub_from_pem(a.gateway_pub.read_bytes()), anchors)
+    if problems:
+        print("\n".join(problems))
+        sys.exit(1)
+    print(f"chain intact: {len(chain)} events, {len(anchors)} anchors checked")
+
+
+def _audit_call(a, tool: str, arguments: dict) -> None:
+    body = sign_request(
+        priv_from_pem(a.agent_key.read_bytes()),
+        server="audit",
+        tool=tool,
+        arguments=arguments,
+        mandate=a.mandate.read_text().strip(),
+    )
+    status, payload = _post(a.url, body)
+    if status != HTTPStatus.OK:
+        print(status)
+        print(json.dumps(payload, indent=2))
+        sys.exit(1)
+    print(json.dumps(payload["result"], indent=2))
+
+
+def cmd_audit_saw(a) -> None:
+    _audit_call(a, "saw", {k: v for k, v in {"jti": a.jti, "principal": a.principal}.items() if v})
+
+
+def cmd_audit_events(a) -> None:
+    args = {"jti": a.jti, "principal": a.principal, "since": a.since, "until": a.until, "limit": a.limit}
+    _audit_call(a, "events", {k: v for k, v in args.items() if v is not None})
+
+
+def _add_audit_parsers(sub) -> None:
+    s = sub.add_parser("audit", help="anchor, verify and read the gateway's audit trail")
+    asub = s.add_subparsers(dest="audit_cmd", required=True)
+    pub_default = lambda: Path(os.environ.get("GATEWAY_STATE_DIR", "gateway/state")) / "gateway.pub"  # noqa: E731
+
+    t = asub.add_parser("anchor", help="save the gateway's signed chain head to a local file")
+    t.add_argument("--url", default="http://localhost:8082", help="gateway address")
+    t.add_argument("--gateway-pub", type=Path, default=pub_default(), help="the gateway's public key (PEM)")
+    t.add_argument("-o", "--out", type=Path, default=Path("audit_anchors.jsonl"), help="file to append to")
+    t.set_defaults(fn=cmd_audit_anchor)
+
+    t = asub.add_parser("verify", help="check every hash, signature and saved anchor in the audit store")
+    t.add_argument("--db", default=os.environ.get("GATEWAY_AUDIT_DB"), help="the audit SQLite file")
+    t.add_argument("--anchors", type=Path, help="file of heads saved with `audit anchor`")
+    t.add_argument("--gateway-pub", type=Path, default=pub_default(), help="the gateway's public key (PEM)")
+    t.set_defaults(fn=cmd_audit_verify)
+
+    for name, fn, text in (
+        ("saw", cmd_audit_saw, "what a mandate received, in plain words (question 14)"),
+        ("events", cmd_audit_events, "the request log for a principal or a mandate (question 16)"),
+    ):
+        t = asub.add_parser(name, help=text)
+        t.add_argument("--mandate", type=Path, required=True, help="your audit-reader mandate")
+        t.add_argument("--agent-key", type=Path, required=True, help="the key that mandate was issued to")
+        t.add_argument("--jti", help="the mandate to read about")
+        t.add_argument("--principal", help="the person whose mandates to read about")
+        t.add_argument("--url", default="http://localhost:8082", help="gateway address")
+        if name == "events":
+            t.add_argument("--since", help="ISO time, inclusive")
+            t.add_argument("--until", help="ISO time, inclusive")
+            t.add_argument("--limit", type=int, help="at most this many events (max 500)")
+        t.set_defaults(fn=fn)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -284,6 +386,8 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--args", default="{}", help="tool arguments (JSON)")
     s.add_argument("--url", default="http://localhost:8082", help="gateway address")
     s.set_defaults(fn=cmd_call)
+
+    _add_audit_parsers(sub)
 
     a = p.parse_args(argv)
     a.fn(a)

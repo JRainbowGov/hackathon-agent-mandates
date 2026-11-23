@@ -6,21 +6,35 @@ POST /tools/call  {server, tool, arguments, mandate, nonce, ts, sig}
 """
 
 import json
+import logging
 import os
+import uuid
 from contextlib import asynccontextmanager
+from http import HTTPStatus
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
+from fastapi import Request as HTTPRequest
 from fastapi.responses import JSONResponse
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel
 
 from gateway.cli import sign_request
+from gateway.lib import audit
 from gateway.lib.common import generate_keypair, pub_to_jwk
 from gateway.lib.gateway_verify import Gateway, Request
 from gateway.lib.interfaces import SERVER_LEVELS
+from gateway.lib.status_list import is_revoked
 from gateway.lib.trust_registry import TrustedList
+
+log = logging.getLogger(__name__)
+# answered by the gateway itself, never forwarded (gateway/lib/audit.py)
+AUDIT_SERVER = "audit"
+AUDIT_TOOLS = {
+    "events": "The request log for a principal or a jti: who called, when, from where, what, and the decision.",
+    "saw": "What a mandate (jti) received: pupils, columns, highest PII level, call counts, in plain words.",
+}
 
 STATE_DIR = Path(os.environ.get("GATEWAY_STATE_DIR", "gateway/state"))
 # name -> URL (or an in-process FastMCP instance in tests); fastmcp.Client accepts both
@@ -51,6 +65,7 @@ def load_state(state_dir: Path) -> None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     load_state(STATE_DIR)
+    audit.init_store(STATE_DIR)  # SQLite file when GATEWAY_AUDIT_DB is set, in memory otherwise
     yield
 
 
@@ -72,6 +87,7 @@ async def describe() -> dict:
                 {"name": t.name, "description": t.description, "input_schema": t.input_schema}
                 for t in await client.list_tools()
             ]
+    servers[AUDIT_SERVER] = [{"name": n, "description": d} for n, d in AUDIT_TOOLS.items()]
     priv, pub = generate_keypair()
     example = sign_request(
         priv,
@@ -100,30 +116,100 @@ async def describe() -> dict:
     }
 
 
-@app.post("/tools/call")
-async def tools_call(body: CallBody):
+def _source_addr(http: HTTPRequest | None) -> str | None:
+    """The caller's address. X-Forwarded-For counts only when the immediate peer is the trusted proxy."""
+    if http is None:
+        return None
+    peer = http.client.host if http.client else None
+    trusted = os.environ.get("GATEWAY_TRUSTED_PROXY")
+    forwarded = http.headers.get("x-forwarded-for")
+    if trusted and peer == trusted and forwarded:
+        return forwarded.split(",")[0].strip()[:64]
+    return peer
+
+
+def _mandate_revoked(event: dict) -> bool | None:
+    """Whether the mandate behind an audit event is revoked now, from its issuer's signed status list."""
     gateway: Gateway = state["gateway"]
-    # re-read the published status list each request so `cli revoke` applies without a restart
-    gateway.status_lists[state["status_uri"]] = (state["dir"] / "status_list.jwt").read_text().strip()
+    pub = gateway.registry.issuer_key(event["iss"] or "", event["issuer_kid"] or "")
+    sl_jwt = gateway.status_lists.get(state["status_uri"])
+    if pub is None or sl_jwt is None or event["status_idx"] is None:
+        return None
+    try:
+        return is_revoked(sl_jwt, event["status_idx"], pub, state["status_uri"])
+    except ValueError:
+        return None
 
-    decision = gateway.decide(Request(**body.model_dump()))
-    record = decision.to_dict()
-    # no audit trail: teams write their own decision record here (e.g. state["dir"] / "audit.jsonl")
 
-    if decision.decision == "DENY":
-        return JSONResponse({"decision": record}, status_code=403)
-    if decision.decision == "STEP_UP":
-        return JSONResponse({"decision": record}, status_code=202)
-
+async def _forward(body: CallBody):
+    """(http_status, result data or None, error text or None) for an allowed call."""
+    if body.server == AUDIT_SERVER:
+        try:
+            return 200, await audit.handle(body.tool, body.arguments, _mandate_revoked), None
+        except ValueError as e:
+            return 400, None, str(e)
     target = MCP_SERVERS.get(body.server)
     if target is None:
-        raise HTTPException(404, f"no MCP server configured for {body.server!r}")
+        return 404, None, f"no MCP server configured for {body.server!r}"
     try:
         async with Client(target) as client:
             result = await client.call_tool(body.tool, body.arguments)
     except ToolError as e:
-        return JSONResponse({"decision": record, "error": str(e)}, status_code=502)
-    return {"decision": record, "result": result.data}
+        return 502, None, str(e)
+    return 200, result.data, None
+
+
+@app.post("/tools/call")
+async def tools_call(body: CallBody, http: HTTPRequest = None):  # None when called in-process (demo)
+    gateway: Gateway = state["gateway"]
+    # re-read the published status list each request so `cli revoke` applies without a restart
+    gateway.status_lists[state["status_uri"]] = (state["dir"] / "status_list.jwt").read_text().strip()
+
+    decision, ctx = gateway.decide_with_context(Request(**body.model_dump()))
+    record = {**decision.to_dict(), "decision_id": str(uuid.uuid4())}
+
+    if decision.decision == "ALLOW":
+        status, data, error = await _forward(body)
+    else:
+        status, data, error = (403 if decision.decision == "DENY" else 202), None, None
+    summary = audit.summarise(data) if status == HTTPStatus.OK else None
+
+    try:
+        await audit.record(
+            decision=record,
+            ctx=ctx,
+            server=body.server,
+            tool=body.tool,
+            arguments=body.arguments,
+            source_addr=_source_addr(http),
+            http_status=status,
+            summary=summary,
+        )
+    except audit.AuditUnavailable:
+        log.exception("audit event not written for decision %s", record["decision_id"])
+        if status == HTTPStatus.OK:  # nothing leaves the gateway without its record
+            withheld = {**record, "decision": "DENY", "reason_code": "AUDIT_UNAVAILABLE", "detail": ""}
+            return JSONResponse({"decision": withheld}, status_code=503)
+
+    if status == HTTPStatus.NOT_FOUND:
+        raise HTTPException(404, error)
+    if error is not None:
+        return JSONResponse({"decision": record, "error": error}, status_code=status)
+    if status != HTTPStatus.OK:
+        return JSONResponse({"decision": record}, status_code=status)
+    return {"decision": record, "result": data}
+
+
+@app.get("/healthcheck/audit")
+def healthcheck_audit() -> dict:
+    """Which audit store is in use and whether it survives a restart. No paths, no events."""
+    return audit.store_status()
+
+
+@app.get("/audit/head")
+async def audit_head() -> dict:
+    """The latest audit event's seq, hash and gateway signature, for anchoring outside the gateway. No data."""
+    return await audit.head()
 
 
 from gateway.demo import router as demo_router  # noqa: E402  (demo imports main lazily)

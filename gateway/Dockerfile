@@ -14,7 +14,9 @@ RUN uv sync --locked --no-dev --no-install-project --extra gateway
 
 COPY gateway gateway
 
-RUN useradd --create-home --shell /bin/bash appuser \
+# the audit volume mounts here; creating it first makes the named volume start owned by appuser
+RUN mkdir -p /app/gateway/audit \
+    && useradd --create-home --shell /bin/bash appuser \
     && chown -R appuser:appuser /app
 
 USER appuser

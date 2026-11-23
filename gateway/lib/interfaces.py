@@ -10,6 +10,7 @@ SERVER_LEVELS: dict[str, int] = {
     "pupil-data": 4,  # the starter server can return special category columns
     "schools": 1,
     "directory": 2,
+    "audit": 2,  # answered by the gateway itself (gateway/lib/audit.py); returns pupil IDs, no other pupil data
     "special": 4,
 }
 

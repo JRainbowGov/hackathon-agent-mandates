@@ -63,7 +63,7 @@ Each event SHALL carry the hash of the event before it and its own hash, compute
 - **THEN** every hash and signature matches and each event's previous hash equals the hash of the event before it
 
 #### Scenario: Edited event is detected
-- **WHEN** someone with database access changes the `reason_code` of one stored event
+- **WHEN** someone with access to the audit file changes the `reason_code` of one stored event, bypassing the gateway
 - **THEN** the verifier reports the first event whose hash no longer matches
 
 ### Requirement: The chain head can be anchored outside the gateway
@@ -81,16 +81,31 @@ Each event SHALL carry the hash of the event before it and its own hash, compute
 When an audit store is configured and the gateway cannot write a call's event, the gateway MUST NOT return any tool result for that call. It SHALL return `503` with reason `AUDIT_UNAVAILABLE` and a `decision_id`. A call the checks refused SHALL still return its refusal.
 
 #### Scenario: Store down on an allowed call
-- **WHEN** the audit database is unreachable and the default mandate makes a call that would be `200 ALLOW`
+- **WHEN** the audit store can't be written (for example the file's volume is full or read-only) and the default mandate makes a call that would be `200 ALLOW`
 - **THEN** the gateway returns `503` with reason `AUDIT_UNAVAILABLE` and no `result` field
 
 #### Scenario: Store down on a refused call
-- **WHEN** the audit database is unreachable and a call is refused with `CONSTRAINT_VIOLATED`
+- **WHEN** the audit store can't be written and a call is refused with `CONSTRAINT_VIOLATED`
 - **THEN** the gateway returns `403` with reason `CONSTRAINT_VIOLATED`
 
 ### Requirement: Recording never changes a decision
-Writing audit events SHALL NOT change any `ALLOW`, `STEP_UP` or `DENY` decision or its reason code, for mandates with or without new claims. With no audit database configured, the gateway SHALL keep events in memory, so the base stack and the eval behave as before apart from the added `decision_id`.
+Writing audit events SHALL NOT change any `ALLOW`, `STEP_UP` or `DENY` decision or its reason code, for mandates with or without new claims. With no audit store configured, the gateway SHALL keep events in memory, so the base stack and the eval behave as before apart from the added `decision_id`.
 
 #### Scenario: Eval unchanged
-- **WHEN** `make eval_run` runs against a gateway with this change and no audit database
+- **WHEN** `make eval_run` runs against a gateway with this change, with the SQLite store or with no store configured
 - **THEN** every case gets the same decision and reason code as before the change, and question 0 passes 12/12
+
+### Requirement: The audit trail is kept in a file that outlives the gateway
+When `GATEWAY_AUDIT_DB` names a file, the gateway SHALL store events in that SQLite file, creating it on first use, and SHALL refuse `UPDATE` and `DELETE` of stored events on every connection to it. `GET /healthcheck/audit` SHALL report which store is in use and whether it is durable, without paths or event data. The deployed stack SHALL set `GATEWAY_AUDIT_DB` to a file on a volume separate from the gateway's key folder.
+
+#### Scenario: Events survive a restart
+- **WHEN** the gateway records events with `GATEWAY_AUDIT_DB` set, then restarts with the same file
+- **THEN** the earlier events are still there, and the next event's previous hash is the last stored event's hash
+
+#### Scenario: Stored events can't be changed through SQL
+- **WHEN** any connection to the file runs `UPDATE audit_events ...` or `DELETE FROM audit_events`
+- **THEN** SQLite refuses it with an append-only error and the events are unchanged
+
+#### Scenario: Health shows the store
+- **WHEN** anyone calls `GET /healthcheck/audit` on a gateway with `GATEWAY_AUDIT_DB` set
+- **THEN** the response is `{"store": "sqlite", "durable": true}`

@@ -2,7 +2,7 @@
 
 - `tools_call` in `gateway/main.py` builds a `Decision` (decision, reason, policy version, mandate and request hashes, `agent_id`, ts, detail) and returns it. Nothing is kept.
 - `Gateway.decide` catches only `Reject`. A mandate that doesn't parse (`"garbage"`) or has no `iss` raises before the first check and returns a `500`, so today such a request couldn't be recorded at all.
-- The dev scaffold (`feature/dev-scaffold`, not yet on main) adds Postgres 17 as a Compose override, `gateway/lib/db.py` (an async pool, off unless `GATEWAY_DATABASE_URL` is set), and `gateway.audit_events`: append-only by grants and triggers, `UNIQUE(prev_hash)` and `UNIQUE(event_hash)`. It lacks event type, verified flag, columns, result hash, policy version, mandate hash, source address and HTTP status.
+- Postgres can't be used where the gateway is deployed, so the store must run inside the gateway container with no extra service. A Postgres dev scaffold exists (PR #2) but this change doesn't depend on it.
 - `gateway_key.pem` and `gateway.pub` are created by `cli init` and used by nothing.
 - The gateway image copies only `gateway/`. PII levels live in `mcp_server/data/synthetic/synthetic_manifest.json`, which the gateway container can't see today.
 - Requirements: `specs/audit-trail/spec.md`, `specs/audit-access/spec.md`, and the `mandate-clearance` delta.
@@ -11,7 +11,7 @@
 
 **Goals:**
 - One module, `gateway/lib/audit.py`, that the other workstreams call without knowing the storage: `record`, `events`, `history`, plus `record_external` for approval events.
-- Recording works the same with and without Postgres, so tests and the eval run on the base stack.
+- Recording works the same with the SQLite file and in memory, so tests and the eval run on the base stack.
 - Tampering is detectable by someone who doesn't trust the gateway's operator.
 
 **Non-Goals:**
@@ -28,12 +28,13 @@
 
 ### 2. A store interface with two implementations
 `AuditStore` with `append(event) -> StoredEvent`, `head()`, `query(filter)` and `history(jti)`.
-- `PostgresStore` when `db.enabled()`.
+- `SqliteStore` when `GATEWAY_AUDIT_DB` is set: Python's built-in `sqlite3`, no new dependency, one file on a named volume.
+- *Alternative:* Postgres (the dev scaffold). Rejected: not available where we deploy, and a second service for one table is more to run.
 - `MemoryStore` otherwise: a list behind an `asyncio.Lock`, lost on restart. `/healthcheck/db` already reports `disabled`, which makes the memory mode visible.
 - *Alternative:* a JSONL file in `gateway/state/`. Rejected: no append-only guarantee, awkward concurrent appends, and the state folder is exactly what the Codex review said should stop being mounted.
 
-### 3. Chain appends are serialised in the database
-`PostgresStore.append` runs one transaction: `pg_advisory_xact_lock(<fixed key>)`, read the last `event_hash`, compute and sign the new event, insert. `UNIQUE(prev_hash)` is the backstop if two writers ever race.
+### 3. Chain appends are serialised by SQLite's single writer
+`SqliteStore.append` runs in a worker thread (`asyncio.to_thread`, since `sqlite3` blocks) behind a lock, as one `BEGIN IMMEDIATE` transaction: read the last `event_hash`, compute and sign the new event, insert, commit. `UNIQUE(prev_hash)` is the backstop. WAL mode lets `audit verify` read a copy while the gateway writes; `synchronous=FULL` so an acknowledged event survives a crash. Triggers make `UPDATE` and `DELETE` raise for every connection.
 - Traffic is a hackathon's, so one lock is fine.
 - *Alternative:* `SERIALIZABLE` isolation with retries. Rejected as more code for no benefit at this volume.
 
@@ -90,19 +91,21 @@ Whoever holds the gateway key can rewrite the whole chain and re-sign it. So:
 
 It's built from verified events only, so forged traffic can't change another mandate's history. `record_external(event_type, jti, ...)` lets the approval layer add `approval_requested`, `approval_granted`, `approval_denied` and `approval_expired` events, which carry a `ref_decision_id` and go into the same chain.
 
-### 11. Schema migration
-`db/init/03_audit_v2.sql` on the scaffold's numbering. It adds:
+### 11. Schema
+The schema is a `CREATE ... IF NOT EXISTS` script in `gateway/lib/audit.py`, run when the store opens, with a `schema_version` table for later changes. Arrays are stored as JSON text. Columns beyond the hashed fields:
 - `event_type` (default `'decision'`);
 - `identity_verified`, `columns_returned`, `result_hash`, `policy_version`, `mandate_hash`, `source_addr`, `http_status`, `ref_decision_id`.
 
-It also relaxes `decision` to nullable, with a check that decision events carry one. Init scripts only run on an empty volume, so the scaffold's `make obs_reset` applies it in dev. `docs/dev-scaffold.md` gets one line on that.
+`decision` is nullable, with a check that decision events carry one.
 
 ## Risks / Trade-offs
 
 - **The log becomes an attack target on Day 2.** Reads need an issuer-signed audit mandate with clearance 2, and they're recorded. `GET /audit/head` exposes only a hash.
 - **Event flooding.** Forged requests write events without any valid mandate, so an attacker can grow the table. At hackathon volume this is acceptable. The rate ceiling planned in the throttle layer bounds it; until then, pre-signature events are size-capped (argument names truncated to 32 keys of 64 characters).
 - **The gateway key signs the chain and lives on the gateway.** Detection relies on external anchors, so the plan says to run `cli audit anchor` on a schedule (every minute during Day 2) from a teammate's laptop.
-- **The memory store is lost on restart.** Run the observability override whenever durability matters, and especially on the deployed URL.
+- **The memory store is lost on restart.** The Compose file always sets `GATEWAY_AUDIT_DB`; `/healthcheck/audit` shows `durable: false` if it's missing.
+- **SQLite has one writer.** Fine for one gateway container; several replicas would each need their own chain.
+- **Whoever has the file can drop the triggers or replace it.** The signed chain and external anchors detect that.
 - **Pupil IDs in the log are pseudonymous level-2 data.** The audit server is level 2 and reads are mandated.
 - **Summarising adds latency.** Results are at most hundreds of rows and the work is linear, under a millisecond.
 - **The manifest mount reverses part of "mount less into the gateway".** It's one read-only public file with no keys, which is acceptable.
@@ -110,9 +113,9 @@ It also relaxes `decision` to nullable, with a check that decision events carry 
 
 ## Migration Plan
 
-1. Merge `feature/dev-scaffold` to main.
-2. Land this change behind no flag. With no database configured it uses the memory store, so behaviour is the old behaviour plus `decision_id`.
-3. Dev and deploy: `make obs_reset && make obs_up` applies the migration.
+1. Land this change. `docker-compose.yaml` sets `GATEWAY_AUDIT_DB`, so the stack keeps a durable log on the `gateway-audit` volume from the first start.
+2. Without the variable (tests, bare `uvicorn`) it uses memory, so behaviour is the old behaviour plus `decision_id`.
+3. To start a fresh log in dev: `docker compose down -v` drops the volume.
 4. Rollback: revert the commit. The audit tables stay and are ignored.
 
 ## Open Questions
