@@ -110,12 +110,16 @@ def check_request(req: Request, scope: list[dict], deny: list[str], step_up_patt
     for pat in deny:
         if fnmatch.fnmatch(name, pat):
             return "DENY", "DENIED_BY_RULE", pat
+    # Each entry is a whole grant: the call is allowed if any one entry accepts every argument it constrains,
+    # so a request cannot take urn from one entry and path from another.
+    refused = None  # the first matching entry's reason, reported when no entry accepts the call
     for entry in scope:
         if entry["server"] != req.server or req.tool not in entry["tools"]:
             continue
         for k, allowed in entry.get("constraints", {}).items():
             if k not in req.arguments:
-                return "DENY", "CONSTRAINT_MISSING", k
+                refused = refused or ("DENY", "CONSTRAINT_MISSING", k)
+                break
             value = req.arguments[k]
             if k == "path" and isinstance(value, str):
                 # one file, one spelling: "./a//b" and "a/x/../b" compare as "a/b". Anything still starting
@@ -123,17 +127,19 @@ def check_request(req: Request, scope: list[dict], deny: list[str], step_up_patt
                 # shortcut: lexical only, agrees with the MCP server's resolve() while the data dir has no symlinks
                 value = posixpath.normpath(value)
             if str(value) not in set(map(str, allowed)):
-                return "DENY", "CONSTRAINT_VIOLATED", f"{k}={req.arguments[k]!r}"
-        limit = req.arguments.get("limit", MAX_ROWS)
-        if type(limit) is not int or not 0 <= limit <= MAX_ROWS:
-            return "DENY", "TOO_MUCH", f"limit={limit!r}, at most {MAX_ROWS}"
-        if req.tool == "search" and not str(req.arguments.get("query", "")).strip():
-            return "DENY", "TOO_MUCH", "empty query matches every row"
-        for pat in step_up_patterns:
-            if fnmatch.fnmatch(name, pat):
-                return "STEP_UP", "SENSITIVE_TOOL", pat
-        return "ALLOW", "IN_SCOPE", ""
-    return "DENY", "OUT_OF_SCOPE", name
+                refused = refused or ("DENY", "CONSTRAINT_VIOLATED", f"{k}={req.arguments[k]!r}")
+                break
+        else:
+            limit = req.arguments.get("limit", MAX_ROWS)
+            if type(limit) is not int or not 0 <= limit <= MAX_ROWS:
+                return "DENY", "TOO_MUCH", f"limit={limit!r}, at most {MAX_ROWS}"
+            if req.tool == "search" and not str(req.arguments.get("query", "")).strip():
+                return "DENY", "TOO_MUCH", "empty query matches every row"
+            for pat in step_up_patterns:
+                if fnmatch.fnmatch(name, pat):
+                    return "STEP_UP", "SENSITIVE_TOOL", pat
+            return "ALLOW", "IN_SCOPE", ""
+    return refused or ("DENY", "OUT_OF_SCOPE", name)
 
 
 # ---------------------------------------------------------------- the pipeline

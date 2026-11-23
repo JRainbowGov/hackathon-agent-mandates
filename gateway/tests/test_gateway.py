@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 from gateway import cli, main
 from gateway import eval as ev
 from gateway.lib.common import priv_from_pem
-from gateway.lib.gateway_verify import Request
+from gateway.lib.gateway_verify import Request, check_request
 from mcp_server.api.routes_mcp import mcp
 
 
@@ -87,6 +87,24 @@ def test_path_spellings(gw):
     ):
         r, _ = call(client, "get", path=path)
         assert (r.status_code, r.json()["decision"]["reason_code"]) == (403, "CONSTRAINT_VIOLATED"), path
+
+
+def test_any_scope_entry_may_allow_but_entries_do_not_mix():
+    def check(tool="t", **arguments):
+        req = Request("s", tool, arguments, mandate="", nonce="", ts=0, sig="")
+        scope = [
+            {"server": "s", "tools": ["t"], "constraints": {"urn": ["SCH01"], "path": ["a"]}},
+            {"server": "s", "tools": ["t"], "constraints": {"urn": ["SCH02"], "path": ["b"]}},
+        ]
+        return check_request(req, scope, deny=[], step_up_patterns=[])[:2]
+
+    assert check(urn="SCH01", path="a") == ("ALLOW", "IN_SCOPE")
+    assert check(urn="SCH02", path="b") == ("ALLOW", "IN_SCOPE")  # the second entry is tried
+    assert check(urn="SCH01", path="b") == ("DENY", "CONSTRAINT_VIOLATED")  # urn from one, path from the other
+    assert check(urn="SCH03", path="a") == ("DENY", "CONSTRAINT_VIOLATED")
+    assert check(path="a") == ("DENY", "CONSTRAINT_MISSING")
+    assert check(urn="SCH02", path="b", limit=101) == ("DENY", "TOO_MUCH")
+    assert check(tool="other", urn="SCH01", path="a") == ("DENY", "OUT_OF_SCOPE")
 
 
 def test_tampered_mandate_is_denied(gw):
