@@ -191,6 +191,15 @@ class Store:
             raise AlreadyDecided(rid)
         return self.get(rid)
 
+    def approved_for(self, requester_jti: str) -> list[dict]:
+        """Every request from this mandate that was approved and minted, oldest first."""
+        rows = self._exec(
+            "SELECT * FROM requests WHERE requester_jti = ? AND status = 'approved' AND minted IS NOT NULL "
+            "ORDER BY created",
+            (requester_jti,),
+        ).fetchall()
+        return [self._row(r) for r in rows]
+
     def set_minted(self, rid: str, jti: str, token: str) -> None:
         self._exec("UPDATE requests SET minted_jti = ?, minted = ? WHERE id = ?", (jti, token, rid))
 
