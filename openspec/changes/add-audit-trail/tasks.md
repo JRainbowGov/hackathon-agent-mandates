@@ -43,3 +43,9 @@
 - [x] 7.2 `make test` passes, including the new audit tests
 - [x] 7.3 `make lint` passes
 - [x] 7.4 `docker compose up -d --build gateway`, then one allowed, one refused and one forged call show up via `cli audit events`, and `cli audit verify` on a copy of the SQLite file reports the chain intact
+
+## 8. For the scope-requests change
+
+- [x] 8.1 Score results of `audit` and `grants` at their server's level with no columns; verify a unit test that a `grants.status`-shaped result scores 1 and an audit read's event records level 2
+- [x] 8.2 Read the parent from `parent.jti` (falling back to `parent_jti`); verify a test that a mandate with a `parent` claim records it on its events
+- [x] 8.3 Add `sign_external_event`, `verify_external_event` and `POST /internal/audit-events` (idempotent by event UUID); verify tests for a recorded and readable approval, a retried event recorded once, and refusals for garbage, the wrong `typ`, an untrusted issuer, a bad signature, an expired event, an unknown type and a non-UUID id

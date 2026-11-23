@@ -426,3 +426,87 @@ def test_gateway_writes_sqlite_when_configured(gw, tmp_path, monkeypatch):  # no
     assert event["decision_id"] == r.json()["decision"]["decision_id"]
     assert event["event_hash"] == head["event_hash"]
     assert event["pupil_ids_returned"] == ["P0004"]
+
+
+# ---------------------------------------------------------------- for scope requests (audit asks)
+
+
+def test_gateway_server_results_scored_at_server_level(gw):  # noqa: F811
+    status = audit.summarise({"request_id": "sr_1", "status": "pending", "summary": "roster at SCH02"}, "grants")
+    assert (status.columns, status.max_pii_level, status.rows) == ([], 1, 1)
+    assert audit.summarise({"verified": [], "claimed": []}, "audit").max_pii_level == 2
+    assert audit.summarise({"request_id": "sr_1", "status": "pending"}).max_pii_level == 4  # not a gateway server
+
+    client, call, state = gw
+    call(client, "search", query="P0004", urn="SCH01")
+    reader(state, principal="officer:jsmith")(client, "audit", "events", principal="officer:jsmith")
+    read_event = all_events()[-1]
+    assert read_event["server"] == "audit"
+    assert read_event["max_pii_level"] == 2
+    assert read_event["columns_returned"] == []
+
+
+def test_parent_jti_comes_from_the_parent_claim(gw):  # noqa: F811
+    client, _, state = gw
+    child = issue(state, "child.jwt", claims={"parent": {"jti": "urn:uuid:parent-1", "status": {"idx": 0}}})
+    caller(state, child)(client, "pupil-data", "search", query="P0004", urn="SCH01")
+    (event,) = all_events()
+    assert event["parent_jti"] == "urn:uuid:parent-1"
+    assert audit._parent_jti({"parent_jti": "urn:uuid:p2"}) == "urn:uuid:p2"  # noqa: SLF001
+    assert audit._parent_jti({"parent": "not-an-object"}) is None  # noqa: SLF001
+
+
+def issuer_signer(state):
+    meta = json.loads((state / "status_list.json").read_text())
+    return priv_from_pem((state / "issuer_key.pem").read_bytes()), meta["issuer"], meta["kid"]
+
+
+def approval(state, **overrides):
+    default_priv, iss, kid = issuer_signer(state)
+    priv = overrides.pop("priv", default_priv)
+    fields = {
+        "iss": iss, "kid": kid, "event_type": "approval_granted", "mandate_jti": "urn:uuid:job-1",
+        "server": "directory", "tool": "roster", "ref_decision_id": str(uuid.uuid4()), "reason_code": "APPROVED",
+        "principal": "officer:jsmith",
+    } | overrides  # fmt: skip
+    return audit.sign_external_event(priv, **fields)
+
+
+def test_issuer_signed_event_is_recorded_once_and_readable(gw):  # noqa: F811
+    client, _, state = gw
+    token = approval(state)
+    r = client.post("/internal/audit-events", json={"token": token})
+    assert r.status_code == 201, r.text
+    assert r.json()["duplicate"] is False
+    again = client.post("/internal/audit-events", json={"token": token})  # the issuer's outbox retries
+    assert again.status_code == 200
+    assert again.json()["duplicate"] is True
+    assert again.json()["decision_id"] == r.json()["decision_id"]
+    (event,) = all_events()
+    assert (event["event_type"], event["jti"], event["principal"]) == ("approval_granted", "urn:uuid:job-1",
+                                                                        "officer:jsmith")  # fmt: skip
+    out = reader(state, principal="officer:jsmith")(client, "audit", "events", principal="officer:jsmith").json()
+    assert [e["event_type"] for e in out["result"]["verified"]] == ["approval_granted"]
+
+
+@pytest.mark.parametrize(
+    ("make", "status", "code"),
+    [
+        (lambda _state: "garbage", 400, "EVENT_INVALID"),
+        (lambda state: (state / "mandate.jwt").read_text(), 400, "EVENT_INVALID"),  # a mandate, wrong typ
+        (lambda state: approval(state, iss="https://someone-else.example"), 403, "ISSUER_NOT_ACCREDITED"),
+        (
+            lambda state: approval(state, priv=priv_from_pem(cli.priv_to_pem(cli.generate_keypair()[0]))),
+            403,
+            "SIG_INVALID",
+        ),
+        (lambda state: approval(state, ttl=-10), 403, "EVENT_EXPIRED"),
+        (lambda state: approval(state, event_type="approval_maybe"), 400, "EVENT_REJECTED"),
+        (lambda state: approval(state, event_id="not-a-uuid"), 400, "EVENT_REJECTED"),
+    ],
+)
+def test_unsigned_or_wrong_events_are_refused(gw, make, status, code):  # noqa: F811
+    client, _, state = gw
+    r = client.post("/internal/audit-events", json={"token": make(state)})
+    assert (r.status_code, r.json()["reason_code"]) == (status, code)
+    assert all_events() == []

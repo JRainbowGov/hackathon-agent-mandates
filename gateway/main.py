@@ -172,7 +172,7 @@ async def tools_call(body: CallBody, http: HTTPRequest = None):  # None when cal
         status, data, error = await _forward(body)
     else:
         status, data, error = (403 if decision.decision == "DENY" else 202), None, None
-    summary = audit.summarise(data) if status == HTTPStatus.OK else None
+    summary = audit.summarise(data, body.server) if status == HTTPStatus.OK else None
 
     try:
         await audit.record(
@@ -198,6 +198,29 @@ async def tools_call(body: CallBody, http: HTTPRequest = None):  # None when cal
     if status != HTTPStatus.OK:
         return JSONResponse({"decision": record}, status_code=status)
     return {"decision": record, "result": data}
+
+
+class ExternalEventBody(BaseModel):
+    token: str  # an audit-event+jwt signed by a trusted issuer (audit.sign_external_event)
+
+
+@app.post("/internal/audit-events")
+async def internal_audit_event(body: ExternalEventBody):
+    """Approval events from the issuer service, added to the audit chain.
+
+    The issuer's signature is the only gate: anyone may call this, but only an event signed by an issuer on the
+    trusted list is recorded. The same event (its jti) sent again is acknowledged without a second record.
+    """
+    try:
+        stored, new = await audit.record_signed_external(body.token, state["gateway"].registry)
+    except audit.ExternalEventRejected as e:
+        status = HTTPStatus.BAD_REQUEST if e.code in ("EVENT_INVALID", "EVENT_REJECTED") else HTTPStatus.FORBIDDEN
+        return JSONResponse({"recorded": False, "reason_code": e.code, "detail": e.detail}, status_code=status)
+    except audit.AuditUnavailable:
+        log.exception("issuer event not written")
+        return JSONResponse({"recorded": False, "reason_code": "AUDIT_UNAVAILABLE"}, status_code=503)
+    payload = {"recorded": True, "duplicate": not new, "decision_id": stored["decision_id"], "seq": stored["seq"]}
+    return JSONResponse(payload, status_code=HTTPStatus.CREATED if new else HTTPStatus.OK)
 
 
 @app.get("/healthcheck/audit")

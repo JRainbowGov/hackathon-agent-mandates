@@ -31,7 +31,10 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from .common import canonical, generate_keypair, priv_from_pem, sha256_hex, sign_bytes, verify_bytes
+import jwt
+
+from .common import canonical, generate_keypair, priv_from_pem, priv_to_pem, pub_to_pem, sha256_hex, sign_bytes, verify_bytes
+from .interfaces import SERVER_LEVELS
 
 log = logging.getLogger(__name__)
 
@@ -45,6 +48,11 @@ UNLISTED_LEVEL = 4
 COLUMN_LEVEL_OVERRIDES = {"letter": 2}
 DEFAULT_MANIFEST = Path(__file__).resolve().parents[2] / "mcp_server/data/synthetic/synthetic_manifest.json"
 APPROVAL_EVENTS = ("approval_requested", "approval_granted", "approval_denied", "approval_expired")
+# Servers the gateway answers itself. Their results are gateway metadata, not table rows, so they are scored at the
+# server's own data level rather than by their keys (a flat dict of non-manifest keys would otherwise score 4).
+GATEWAY_SERVERS = frozenset({"audit", "grants"})
+EXTERNAL_EVENT_TYP = "audit-event+jwt"
+EXTERNAL_EVENT_MAX_AGE_S = 24 * 3600  # an issuer outbox may retry for a day
 
 # Every field an event carries, in no particular order (canonical JSON sorts them). seq, event_hash and sig are
 # stored alongside but are not part of what is hashed.
@@ -151,12 +159,20 @@ def _pupils_in(data: Any, found: set[str]) -> None:
             _pupils_in(v, found)
 
 
-def summarise(data: Any) -> Summary:
-    """What a result handed to the agent: row count, pupil IDs, column names, highest PII level, a hash."""
-    rows = _rows_of(data)
-    columns = sorted({k for r in rows for k in r})
+def summarise(data: Any, server: str | None = None) -> Summary:
+    """What a result handed to the agent: row count, pupil IDs, column names, highest PII level, a hash.
+
+    A result from a server the gateway answers itself (`audit`, `grants`) has no table columns and is scored at that
+    server's data level, so reading the audit trail or a request's status doesn't count as seeing special category data.
+    """
     pupils: set[str] = set()
     _pupils_in(data, pupils)
+    if server in GATEWAY_SERVERS:
+        count = len(data) if isinstance(data, list) else (1 if data not in (None, {}) else 0)
+        level = SERVER_LEVELS.get(server, 1) if count else None
+        return Summary(count, sorted(pupils), [], level, sha256_hex(canonical(data)))
+    rows = _rows_of(data)
+    columns = sorted({k for r in rows for k in r})
     level = max((column_level(c) for c in columns), default=None)
     if level is None and data not in (None, [], {}):
         # a document (a JSON file, classification(), an audit read): no table columns; pupil IDs make it level 2
@@ -222,6 +238,9 @@ class MemoryStore:
 
     async def for_jtis(self, jtis: set[str]) -> list[dict]:
         return [e for e in self._events if e["jti"] in jtis]
+
+    async def by_decision_id(self, decision_id: str) -> dict | None:
+        return next((e for e in self._events if e["decision_id"] == decision_id), None)
 
     async def verified_matching(self, principal: str | None, jti: str | None) -> list[dict]:
         return [e for e in self._events if e["identity_verified"] and _matches(e, principal, jti)]
@@ -351,6 +370,10 @@ class SqliteStore:
     async def all_events(self) -> list[dict]:
         return await self._select()
 
+    async def by_decision_id(self, decision_id: str) -> dict | None:
+        rows = await self._select("WHERE decision_id = ?", (decision_id,))
+        return rows[0] if rows else None
+
     async def for_jtis(self, jtis: set[str]) -> list[dict]:
         if not jtis:
             return []
@@ -408,6 +431,15 @@ def _arg_hash(arguments: dict) -> str:
         return sha256_hex(repr(arguments).encode())
 
 
+def _parent_jti(claims: dict) -> str | None:
+    """The parent mandate's jti: `parent.jti` (supplementary mandates), or a top-level `parent_jti`."""
+    parent = claims.get("parent")
+    if isinstance(parent, dict) and isinstance(parent.get("jti"), str):
+        return parent["jti"]
+    value = claims.get("parent_jti")
+    return value if isinstance(value, str) else None
+
+
 async def record(
     *,
     decision: dict,
@@ -433,7 +465,7 @@ async def record(
         "issuer_kid": ctx.kid,
         "status_idx": status.get("idx") if claims else None,
         "principal": (claims.get("delegator") or {}).get("principal") if claims else None,
-        "parent_jti": claims.get("parent_jti") if claims else None,
+        "parent_jti": _parent_jti(claims) if claims else None,
         "server": str(server)[:MAX_KEY_LEN],
         "tool": str(tool)[:MAX_KEY_LEN],
         "arg_keys": _arg_keys(arguments),
@@ -471,14 +503,23 @@ async def record_external(
     reason_code: str,
     principal: str | None = None,
     agent_id: str | None = None,
+    event_id: str | None = None,
 ) -> dict:
-    """Add an event another gateway layer produced (approvals) to the same chain. jti must be verified upstream."""
+    """Add an event another gateway layer produced (approvals) to the same chain. jti must be verified upstream.
+
+    `event_id` becomes the event's decision_id. Passing the same one twice records it once: the second call returns
+    the stored event, so a sender that retries after a lost acknowledgement doesn't duplicate history.
+    """
     if event_type not in APPROVAL_EVENTS:
         msg = f"event_type must be one of {APPROVAL_EVENTS}"
         raise ValueError(msg)
-    event = {k: None for k in FIELDS}
+    decision_id = str(uuid.UUID(event_id)) if event_id else str(uuid.uuid4())
+    store = get_store()
+    if event_id and (existing := await store.by_decision_id(decision_id)):
+        return existing
+    event = dict.fromkeys(FIELDS)
     event.update(
-        decision_id=str(uuid.uuid4()),
+        decision_id=decision_id,
         ts=now_iso(),
         event_type=event_type,
         identity_verified=True,
@@ -493,7 +534,81 @@ async def record_external(
         ref_decision_id=ref_decision_id,
         policy_version=None,
     )
-    return await get_store().append(event)
+    return await store.append(event)
+
+
+# ---------------------------------------------------------------- events signed by the issuer service
+
+
+class ExternalEventRejected(Exception):
+    def __init__(self, code: str, detail: str = ""):
+        super().__init__(f"{code}: {detail}")
+        self.code, self.detail = code, detail
+
+
+def sign_external_event(priv, *, iss: str, kid: str, event_type: str, mandate_jti: str, server: str, tool: str,
+                        ref_decision_id: str, reason_code: str, principal: str | None = None,
+                        agent_id: str | None = None, event_id: str | None = None, ttl: int = 3600) -> str:
+    """For the issuer service: an approval event, signed with the issuer key, that the gateway will record."""
+    now = int(datetime.now(UTC).timestamp())
+    claims = {
+        "iss": iss, "jti": event_id or str(uuid.uuid4()), "iat": now, "exp": now + ttl,
+        "event_type": event_type, "mandate_jti": mandate_jti, "server": server, "tool": tool,
+        "ref_decision_id": ref_decision_id, "reason_code": reason_code,
+        "principal": principal, "agent_id": agent_id,
+    }  # fmt: skip
+    return jwt.encode(claims, priv_to_pem(priv), algorithm="EdDSA", headers={"typ": EXTERNAL_EVENT_TYP, "kid": kid})
+
+
+def verify_external_event(token: str, registry) -> dict:
+    """The claims of an issuer-signed approval event, or ExternalEventRejected with a stable reason code."""
+    try:
+        hdr = jwt.get_unverified_header(token)
+        unverified = jwt.decode(token, options={"verify_signature": False})
+    except Exception as e:  # noqa: BLE001
+        raise ExternalEventRejected("EVENT_INVALID", "not a JWT") from e
+    if hdr.get("typ") != EXTERNAL_EVENT_TYP:
+        raise ExternalEventRejected("EVENT_INVALID", f"typ must be {EXTERNAL_EVENT_TYP}")
+    iss = unverified.get("iss")
+    pub = registry.issuer_key(iss, hdr.get("kid", "")) if isinstance(iss, str) else None
+    if pub is None:
+        raise ExternalEventRejected("ISSUER_NOT_ACCREDITED", str(iss))
+    try:
+        claims = jwt.decode(token, pub_to_pem(pub), algorithms=["EdDSA"],
+                            options={"require": ["iss", "jti", "iat", "exp"]})  # fmt: skip
+    except jwt.ExpiredSignatureError as e:
+        raise ExternalEventRejected("EVENT_EXPIRED", claims_jti(unverified)) from e
+    except jwt.PyJWTError as e:
+        raise ExternalEventRejected("SIG_INVALID", type(e).__name__) from e
+    now = datetime.now(UTC).timestamp()
+    if not isinstance(claims["iat"], int) or claims["iat"] > now + 30 or claims["iat"] < now - EXTERNAL_EVENT_MAX_AGE_S:
+        raise ExternalEventRejected("EVENT_EXPIRED", claims_jti(claims))
+    if claims.get("event_type") not in APPROVAL_EVENTS:
+        raise ExternalEventRejected("EVENT_REJECTED", f"event_type must be one of {APPROVAL_EVENTS}")
+    for k in ("mandate_jti", "server", "tool", "ref_decision_id", "reason_code"):
+        if not isinstance(claims.get(k), str) or not claims[k]:
+            raise ExternalEventRejected("EVENT_REJECTED", f"{k} is required")
+    try:
+        uuid.UUID(claims["jti"])
+    except (ValueError, TypeError) as e:
+        raise ExternalEventRejected("EVENT_REJECTED", "jti must be a UUID") from e
+    return claims
+
+
+def claims_jti(claims: dict) -> str:
+    return str(claims.get("jti", ""))
+
+
+async def record_signed_external(token: str, registry) -> tuple[dict, bool]:
+    """Verify an issuer-signed event and record it once. Returns (stored event, newly recorded)."""
+    c = verify_external_event(token, registry)
+    before = await get_store().by_decision_id(str(uuid.UUID(c["jti"])))
+    stored = await record_external(
+        c["event_type"], jti=c["mandate_jti"], server=c["server"], tool=c["tool"],
+        ref_decision_id=c["ref_decision_id"], reason_code=c["reason_code"], principal=c.get("principal"),
+        agent_id=c.get("agent_id"), event_id=c["jti"],
+    )  # fmt: skip
+    return stored, before is None
 
 
 # ---------------------------------------------------------------- reading

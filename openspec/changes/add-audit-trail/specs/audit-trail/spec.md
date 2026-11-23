@@ -27,7 +27,7 @@ An audit event MUST NOT contain the values of request arguments, the decision de
 - **THEN** the audit event contains the argument names `query` and `urn`, the URN `SCH01` and an argument hash, and does not contain the text `Zara Okafor`
 
 ### Requirement: Identity on an event is marked verified or claimed
-When the mandate and the request signature both verify, the event SHALL record the mandate's `jti`, `iss`, `agent_id`, delegator principal and parent `jti` (if any) as verified. When a refusal happens before that, the event SHALL record whatever `jti` and `iss` the mandate claims, if they can be parsed, and MUST mark them as claimed and not verified, with no `agent_id` or principal.
+When the mandate and the request signature both verify, the event SHALL record the mandate's `jti`, `iss`, `agent_id`, delegator principal and parent `jti` (if any, read from the mandate's `parent.jti`, or a top-level `parent_jti`) as verified. When a refusal happens before that, the event SHALL record whatever `jti` and `iss` the mandate claims, if they can be parsed, and MUST mark them as claimed and not verified, with no `agent_id` or principal.
 
 #### Scenario: Forged mandate refusal
 - **WHEN** a request carries a mandate whose payload was edited after signing, claiming `jti` `urn:uuid:1111`, and the gateway returns `403 DENY` with reason `SIG_INVALID`
@@ -45,11 +45,19 @@ Every `POST /tools/call` response SHALL include a `decision_id` field inside the
 - **THEN** the response body's `decision.decision_id` is a UUID, and an audit event with that `decision_id` exists
 
 ### Requirement: An allowed call records what came back
-For an `ALLOW` decision whose result reached the agent, the event SHALL record: the number of rows returned, the distinct pupil IDs that appear in the result, the column names that appear in the result, the highest PII level among those columns according to the data manifest's classification (a column the manifest does not list counts as level 4), and a hash of the result exactly as returned.
+For an `ALLOW` decision whose result reached the agent, the event SHALL record: the number of rows returned, the distinct pupil IDs that appear in the result, the column names that appear in the result, the highest PII level among those columns according to the data manifest's classification (a column the manifest does not list counts as level 4), and a hash of the result exactly as returned. A result from a server the gateway answers itself (`audit`, `grants`) SHALL record no columns and SHALL be scored at that server's data level, because it is gateway metadata, not table rows.
 
 #### Scenario: A census search
 - **WHEN** the default Ashfield mandate calls `pupil-data.search(query="P0004", urn="SCH01")` and the result has N census rows, all for `P0004`
 - **THEN** the event records N rows, pupil IDs `[P0004]`, the census column names, highest PII level 4, and a result hash
+
+#### Scenario: A gateway server's result
+- **WHEN** an allowed `grants.status` call returns `{"request_id": "sr_1", "status": "pending", "summary": "..."}`
+- **THEN** the event records no columns and highest PII level 1, the `grants` server's level, not 4
+
+#### Scenario: A supplementary mandate's parent
+- **WHEN** a mandate carrying `"parent": {"jti": "urn:uuid:parent-1", ...}` makes an allowed call
+- **THEN** the event records parent `jti` `urn:uuid:parent-1`
 
 #### Scenario: A public file
 - **WHEN** the default mandate calls `pupil-data.get(path="synthetic/synthetic_schools.csv")`

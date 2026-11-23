@@ -65,7 +65,7 @@ Whoever holds the gateway key can rewrite the whole chain and re-sign it. So:
 - `rows`: list length, or 1 for a single dict, or 0 for empty.
 - `pupil_ids`: every string value under the keys `Psuedo ID` or `pupil_id`, at any depth, that matches `P` followed by 4 digits.
 - `columns`: the keys of the result's row dicts.
-- `max_pii_level`: the highest level among those columns. Each column name takes the highest level any manifest table gives it; a name the manifest doesn't list counts as 4. Per-tool overrides for known derived columns (`letter` from `draft` is level 2) live in gateway config, which the access-config workstream owns.
+- `max_pii_level`: the highest level among those columns. Results of servers the gateway answers itself (`audit`, `grants`) are scored at the server's level from `SERVER_LEVELS` with no columns: they're metadata, and their keys would otherwise count as unlisted level-4 columns. Each column name takes the highest level any manifest table gives it; a name the manifest doesn't list counts as 4. Per-tool overrides for known derived columns (`letter` from `draft` is level 2) live in gateway config, which the access-config workstream owns.
 - `result_hash`: sha256 of `canonical(result.data)`.
 - The gateway reads the manifest from `GATEWAY_MANIFEST_PATH`, mounted read-only into the gateway container in `docker-compose.yaml`. If it's missing, every column counts as level 4, which over-reports but never under-reports.
 
@@ -90,6 +90,13 @@ Whoever holds the gateway key can rewrite the whole chain and re-sign it. So:
 - first and last time.
 
 It's built from verified events only, so forged traffic can't change another mandate's history. `record_external(event_type, jti, ...)` lets the approval layer add `approval_requested`, `approval_granted`, `approval_denied` and `approval_expired` events, which carry a `ref_decision_id` and go into the same chain.
+
+### 10a. Approval events from the issuer service
+The scope-requests change puts the issuer key in its own service, so approvals happen off the gateway. The issuer signs each event as an `audit-event+jwt` with the issuer key (`audit.sign_external_event`, which the issuer can import). It posts the event to `POST /internal/audit-events`, and the gateway verifies it against `trusted_list.json` and calls `record_external`.
+- **Idempotent:** the event's own UUID becomes its `decision_id`, which is `UNIQUE`, so an outbox that retries after a lost acknowledgement doesn't duplicate history.
+- **Reachable publicly:** the signature is the gate, not the network. Without the issuer key nobody can write approval history.
+- **Window:** events are accepted up to a day after `iat` and until `exp`, so retries survive an outage.
+- *Alternative:* the issuer writes to the SQLite file directly. Rejected: two writers to one chain, and the file is the gateway's.
 
 ### 11. Schema
 The schema is a `CREATE ... IF NOT EXISTS` script in `gateway/lib/audit.py`, run when the store opens, with a `schema_version` table for later changes. Arrays are stored as JSON text. Columns beyond the hashed fields:
