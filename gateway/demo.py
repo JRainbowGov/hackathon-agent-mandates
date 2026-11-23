@@ -75,10 +75,17 @@ def demo_issuer():
     }
 
 
+def _needs_issuer_key(state_dir) -> None:
+    # the deployed gateway no longer holds the issuer key (add-scope-requests), so it can't mint or revoke here
+    if not (state_dir / "issuer_key.pem").exists():
+        raise HTTPException(503, "minting and revoking moved to the issuer service; run the demo with the full state")
+
+
 @router.post("/mandate")
 def demo_mandate(body: MandateBody):
     """Write a mandate: a signed note that hands part of a person's access to one agent."""
     state_dir = _gw().state["dir"]
+    _needs_issuer_key(state_dir)
     agent_priv = load_or_create_key(state_dir / "demo_agent.pem")
     token, idx = issue_mandate(
         state_dir,
@@ -135,6 +142,7 @@ def demo_trust():
 @router.post("/revoke")
 def demo_revoke(body: RevokeBody):
     """Cancel a mandate by the number it was given when issued."""
+    _needs_issuer_key(_gw().state["dir"])
     revoke_mandate(_gw().state["dir"], body.idx)
     return _trust_view()
 

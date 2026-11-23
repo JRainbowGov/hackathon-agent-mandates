@@ -143,6 +143,30 @@
               }
             },
             "additionalProperties": false
+          },
+          "audience": {
+            "type": "object",
+            "required": [
+              "pupils"
+            ],
+            "additionalProperties": false,
+            "description": "Whose data this entry covers: 1 to 500 pupil IDs, fixed at signing. pupil_id and pupil_ids outside it are refused (AUDIENCE_VIOLATED); search and roster results are filtered at the tool through the tool grant. Any other form is AUDIENCE_INVALID.",
+            "properties": {
+              "pupils": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 500,
+                "items": {
+                  "type": "string",
+                  "pattern": "^P\\d{4}$"
+                }
+              }
+            }
+          },
+          "max_rows": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Most rows a tool may return under this entry; carried in the tool grant and enforced by the server. Default 100."
           }
         }
       },
@@ -205,6 +229,72 @@
         }
       },
       "additionalProperties": false
+    },
+    "parent": {
+      "type": "object",
+      "required": [
+        "jti",
+        "status"
+      ],
+      "description": "Supplementary mandates only (add-scope-requests): the mandate this one was minted from. The gateway refuses this mandate with PARENT_REVOKED once the parent's status bit is set, and STATUS_UNAVAILABLE if it can't read the parent's list. Budgets count per family (parent.jti).",
+      "properties": {
+        "jti": {
+          "type": "string"
+        },
+        "status": {
+          "type": "object",
+          "required": [
+            "uri",
+            "idx"
+          ],
+          "properties": {
+            "uri": {
+              "type": "string"
+            },
+            "idx": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "mandate_hash": {
+          "type": "string",
+          "description": "sha256 of the parent's compact JWT; binds preapproved action hashes to the call that was held"
+        }
+      }
+    },
+    "approved_by": {
+      "type": "object",
+      "description": "Supplementary mandates only: who approved the scope request it came from.",
+      "properties": {
+        "kind": {
+          "enum": [
+            "person",
+            "agent"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "mandate_jti": {
+          "type": "string"
+        }
+      }
+    },
+    "preapproved": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Action hashes (sha256 of server, tool, exact arguments and the parent mandate hash) of held calls a person approved. Each is released once (reason PREAPPROVED); the mandate lives at most 5 minutes."
+    },
+    "can_delegate": {
+      "type": "boolean",
+      "description": "This mandate may approve another agent's scope request (grants.decide) from the same principal, but only for grants its own scope and clearance cover, and never a held call."
     }
-  }
+  },
+  "$comment": "Tool grants (add-scope-requests): for every forwarded call the gateway signs a tool-grant+jwt with tool_grant_key.pem: aud = server, tool, args_hash, jti = the call's audit decision_id, sub = mandate jti, level, subjects {urns, pupils}, constraints, max_rows, exp (30 s). Servers verify it with tool_grant.pub and apply it to their output."
 }
