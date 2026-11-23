@@ -18,11 +18,13 @@ hack: install  ## One command start: keys, one-school mandate, eval pack, contai
 	test -f gateway/state/trusted_list.json || uv run python -m gateway.cli init
 	uv run python -m gateway.cli issue --agent-key gateway/state/agent.pem -o gateway/state/mandate.jwt
 	uv run python -m gateway.eval build -o eval_pack
+	uv run python -m gateway.cli grant-key
 	docker compose up -d --wait
 	uv run python -m gateway.cli call --mandate gateway/state/mandate.jwt --agent-key gateway/state/agent.pem \
 		--tool search --args '{"query": "P0004", "urn": "SCH01"}'
 
 run:
+	uv run python -m gateway.cli grant-key
 	docker compose up -d --wait
 
 stop:
@@ -30,6 +32,9 @@ stop:
 
 gateway_init:  ## Generate gateway keys, trusted list and status list in gateway/state
 	uv run python -m gateway.cli init
+
+grant_key:  ## Make sure the tool-grant key exists (the MCP servers mount its public half)
+	uv run python -m gateway.cli grant-key
 
 gateway_issue:  ## Issue a default one-school (SCH01) mandate to gateway/state/agent.pem
 	uv run python -m gateway.cli issue --agent-key gateway/state/agent.pem -o gateway/state/mandate.jwt

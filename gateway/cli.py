@@ -43,6 +43,7 @@ from gateway.lib.common import (
 from gateway.lib.gateway_verify import Request
 from gateway.lib.mandate_issuer import MandateIssuer
 from gateway.lib.status_list import StatusListIssuer
+from tool_grants import ensure_keypair
 
 # search pupils of SCH01 only; get only the two files that hold no pupil data. Also the Day 2 attack mandate.
 DEFAULT_SCOPE = [
@@ -167,6 +168,10 @@ def cmd_init(a) -> None:
     (state / "issuer_key.pem").write_bytes(priv_to_pem(issuer_priv))
     (state / "gateway_key.pem").write_bytes(priv_to_pem(gateway_priv))
     (state / "gateway.pub").write_bytes(pub_to_pem(gateway_pub))
+    # tool grants (gateway -> MCP servers): the gateway signs, the servers get only tool_grant.pub
+    for name in ("tool_grant_key.pem", "tool_grant.pub"):
+        (state / name).unlink(missing_ok=True)
+    ensure_keypair(state / "tool_grant_key.pem", state / "tool_grant.pub")
     trusted = {"issuers": {a.issuer: {a.kid: pub_to_jwk(issuer_pub)}}}
     (state / "trusted_list.json").write_text(json.dumps(trusted, indent=2))
     meta = {"issuer": a.issuer, "kid": a.kid, "uri": f"{a.issuer}/status/1", "next": 0, "bits_b64u": ""}
@@ -198,6 +203,11 @@ def cmd_keygen(a) -> None:
         sys.exit(f"{a.out} already exists")
     priv = load_or_create_key(a.out)
     print(json.dumps(pub_to_jwk(priv.public_key())))
+
+
+def cmd_grant_key(a) -> None:
+    ensure_keypair(a.state / "tool_grant_key.pem", a.state / "tool_grant.pub")
+    print(f"tool grant key ready: {a.state / 'tool_grant.pub'}")
 
 
 def cmd_discover(a) -> None:
@@ -353,6 +363,9 @@ def main(argv: list[str] | None = None) -> None:
     s = sub.add_parser("keygen", help="make an agent key; prints the public half for the issuer")
     s.add_argument("-o", "--out", type=Path, default=Path("agent.pem"), help="where to save the private key")
     s.set_defaults(fn=cmd_keygen)
+
+    s = sub.add_parser("grant-key", help="make sure the gateway's tool-grant key exists (servers mount the .pub)")
+    s.set_defaults(fn=cmd_grant_key)
 
     s = sub.add_parser("discover", help="show what a gateway offers and how to sign a call")
     s.add_argument("--url", default="http://localhost:8082", help="gateway address")

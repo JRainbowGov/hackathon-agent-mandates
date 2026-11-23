@@ -18,6 +18,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi import Request as HTTPRequest
 from fastapi.responses import JSONResponse
 from fastmcp import Client
+from fastmcp.client.transports import StreamableHttpTransport
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel
 
@@ -25,9 +26,12 @@ from gateway.cli import sign_request
 from gateway.lib import audit, budgets, safe_counts
 from gateway.lib.common import generate_keypair, pub_to_jwk
 from gateway.lib.gateway_verify import AuditContext, Gateway, Request
+from gateway.lib.grant_issue import BREAKDOWN_MAX_ROWS, grant_for
 from gateway.lib.interfaces import SERVER_LEVELS
 from gateway.lib.status_list import is_revoked
 from gateway.lib.trust_registry import TrustedList
+from tool_grants import HEADER as GRANT_HEADER
+from tool_grants import ensure_keypair
 
 log = logging.getLogger(__name__)
 # answered by the gateway itself, never forwarded (gateway/lib/audit.py)
@@ -62,6 +66,8 @@ def load_state(state_dir: Path) -> None:
     state["status_uri"] = json.loads((state_dir / "status_list.json").read_text())["uri"]
     state["dir"] = state_dir
     state["limits"] = budgets.State(budgets.load_limits())  # fails startup on an invalid limits file
+    # signs one tool grant per forwarded call (add-scope-requests, tool-grants); servers hold tool_grant.pub
+    state["grant_key"] = ensure_keypair(state_dir / "tool_grant_key.pem", state_dir / "tool_grant.pub")
 
 
 @asynccontextmanager
@@ -145,7 +151,7 @@ def _mandate_revoked(event: dict) -> bool | None:
         return None
 
 
-async def _forward(body: CallBody, k: int = safe_counts.DEFAULT_K):
+async def _forward(body: CallBody, ctx: AuditContext, decision_id: str, k: int = safe_counts.DEFAULT_K):
     """(http_status, result data or None, error text or None) for an allowed call."""
     if body.server == AUDIT_SERVER:
         try:
@@ -159,6 +165,20 @@ async def _forward(body: CallBody, k: int = safe_counts.DEFAULT_K):
     per_pupil = counts and safe_counts.has_pupils(str(body.arguments.get("table", "")))
     # counts: the one upstream call is the per-pupil breakdown, which never leaves the gateway (add-safe-counts)
     arguments = safe_counts.breakdown_arguments(body.arguments) if per_pupil else body.arguments
+    if isinstance(target, str):  # over HTTP the server checks a grant; in-process targets (tests) get none
+        grant = grant_for(
+            state["grant_key"],
+            ctx.claims,
+            ctx.entry,
+            server=body.server,
+            tool=body.tool,
+            arguments=arguments,  # what is actually sent, so the server's args_hash check matches
+            decision_id=decision_id,
+            # the per-pupil breakdown is folded into rounded counts here and never reaches the agent: capping
+            # its rows would corrupt the counts, so the cap applies to the folded result instead
+            max_rows=BREAKDOWN_MAX_ROWS if per_pupil else None,
+        )
+        target = StreamableHttpTransport(target, headers={GRANT_HEADER: grant})
     try:
         async with Client(target) as client:
             result = await client.call_tool(body.tool, arguments)
@@ -250,7 +270,7 @@ async def _allowed(limits: budgets.State, decision, ctx, plan, body: CallBody, *
             decision = _deny(decision, *refused)
             status, data, error = HTTPStatus.TOO_MANY_REQUESTS, None, None
         else:
-            status, data, error = await _forward(body, safe_counts.k_for(ctx.claims))
+            status, data, error = await _forward(body, ctx, decision_id, safe_counts.k_for(ctx.claims))
         min_level = safe_counts.max_level(body.arguments) if counts else None
         summary = audit.summarise(data, body.server, min_level=min_level) if status == HTTPStatus.OK else None
         if summary is not None and (over := await _pupil_budget(limits, plan, summary)):

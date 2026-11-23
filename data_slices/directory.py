@@ -7,12 +7,15 @@ drops every census column above level 2 before this module sees a row.
 from fastmcp import FastMCP
 
 from data_slices import reader
+from tool_grants import granted, level_function
 
 LEVEL = 2
 KEYS = ("Psuedo ID", "DisplayName")
 YEAR_GROUP_AGE = {10: "14", 11: "15"}  # AgeAtStartOfAcademicYear for each year group
 
 mcp = FastMCP("directory")
+# every tool checks its arguments against, and filters its output by, the call's tool grant
+GRANTED = granted(level_function(reader.DATA_ROOT / "synthetic_manifest.json"))
 
 
 def _names() -> dict[str, str]:
@@ -20,6 +23,7 @@ def _names() -> dict[str, str]:
 
 
 @mcp.tool
+@GRANTED
 def roster(urn: str, year_group: int, academic_year: str = "2023/24", term: str = "SPR") -> list[dict]:
     """
     The pupils in one year group at one school, by pseudo ID and display name.
@@ -43,6 +47,7 @@ def roster(urn: str, year_group: int, academic_year: str = "2023/24", term: str 
 
 
 @mcp.tool
+@GRANTED
 def name(pupil_id: str, urn: str) -> dict:
     """One pupil's pseudo ID and display name. Empty if the pupil is not currently at `urn`."""
     if reader.latest_at(reader.rows("personal_data_school_census", LEVEL), pupil_id, urn) is None:

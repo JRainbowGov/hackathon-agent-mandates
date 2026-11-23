@@ -21,6 +21,7 @@ from dataclasses import asdict, dataclass, field
 import jwt
 
 from .common import canonical, jwk_thumbprint, jwk_to_pub, pub_to_pem, sha256_hex, verify_bytes
+from .audience import check_audience
 from .interfaces import check_clearance
 from .status_list import is_revoked
 
@@ -70,6 +71,7 @@ class AuditContext:
     claimed_jti: str | None = None
     claimed_iss: str | None = None
     scope_values: dict[str, str] = field(default_factory=dict)
+    entry: dict | None = None  # the scope entry that allowed or held the call; the tool grant derives from it
 
 
 def _claimed_identity(token: str) -> tuple[str | None, str | None, str | None]:
@@ -164,8 +166,15 @@ def verify_mandate(token: str, registry, status_lists: dict[str, str]) -> dict:
 
 
 def check_request(
-    req: Request, scope: list[dict], deny: list[str], step_up_patterns: list[str], claims: dict
+    req: Request,
+    scope: list[dict],
+    deny: list[str],
+    step_up_patterns: list[str],
+    claims: dict,
+    matched: list | None = None,
 ) -> tuple[str, str, str]:
+    """(decision, reason_code, detail). When the call is allowed or held, the accepting scope entry is appended
+    to `matched`, so the tool grant can be derived from exactly what allowed it."""
     name = f"{req.server}.{req.tool}"
     for pat in deny:
         if fnmatch.fnmatch(name, pat):
@@ -193,11 +202,17 @@ def check_request(
                 refused = refused or ("DENY", "CONSTRAINT_VIOLATED", f"{k}={req.arguments[k]!r}")
                 break
         else:
+            # whose data: an entry with an audience only covers the pupils it lists (mandate-audience)
+            if outside := check_audience(entry, req.arguments):
+                refused = refused or outside
+                continue
             limit = req.arguments.get("limit", MAX_ROWS)
             if type(limit) is not int or not 0 <= limit <= MAX_ROWS:
                 return "DENY", "TOO_MUCH", f"limit={limit!r}, at most {MAX_ROWS}"
             if req.tool == "search" and not str(req.arguments.get("query", "")).strip():
                 return "DENY", "TOO_MUCH", "empty query matches every row"
+            if matched is not None:
+                matched.append(entry)
             for pat in step_up_patterns:
                 if fnmatch.fnmatch(name, pat):
                     return "STEP_UP", "SENSITIVE_TOOL", pat
@@ -240,7 +255,11 @@ class Gateway:
             ctx.kid = jwt.get_unverified_header(req.mandate).get("kid")  # header was checked with the signature
 
             ctx.scope_values = _scope_values(req, claims["scope"])
-            decision, code, detail = check_request(req, claims["scope"], claims["deny"], self.step_up, claims)
+            matched: list[dict] = []
+            decision, code, detail = check_request(
+                req, claims["scope"], claims["deny"], self.step_up, claims, matched
+            )
+            ctx.entry = matched[0] if matched else None
             return Decision(decision, code, agent_id=claims["agent_id"], detail=detail, **base), ctx
         except Reject as r:
             result = Decision("DENY", r.code, agent_id=None, detail=r.detail, **base)

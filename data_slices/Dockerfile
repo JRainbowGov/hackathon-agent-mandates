@@ -14,6 +14,7 @@ RUN uv sync --locked --no-dev --no-install-project --extra fastapi
 
 # code only; the data is mounted read-only at /app/mcp_server/data by docker-compose.yaml
 COPY data_slices data_slices
+COPY tool_grants tool_grants
 
 RUN useradd --create-home --shell /bin/bash appuser \
     && chown -R appuser:appuser /app

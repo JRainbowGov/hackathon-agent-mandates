@@ -6,6 +6,11 @@ services:
       dockerfile: ./mcp_server/Dockerfile
     volumes:
       - ./mcp_server/data:/app/mcp_server/data
+      # tool grants: only the public half of the gateway's grant key (make grant_key creates it)
+      - ./gateway/state/tool_grant.pub:/app/keys/tool_grant.pub:ro
+    environment:
+      - TOOL_GRANTS=enforce
+      - TOOL_GRANT_PUB=/app/keys/tool_grant.pub
     container_name: mcp-backend
     ports:
       - "8080:8080"
@@ -48,6 +53,10 @@ services:
       dockerfile: ./data_slices/Dockerfile
     volumes:
       - ./mcp_server/data:/app/mcp_server/data:ro
+      - ./gateway/state/tool_grant.pub:/app/keys/tool_grant.pub:ro
+    environment:
+      - TOOL_GRANTS=enforce
+      - TOOL_GRANT_PUB=/app/keys/tool_grant.pub
     container_name: data-slices
     healthcheck:
       test: [ "CMD", "curl", "--fail", "http://localhost:8090/healthcheck" ]

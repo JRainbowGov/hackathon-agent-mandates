@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from fastmcp.utilities.lifespan import combine_lifespans
 
 from data_slices import directory, schools, special
+from tool_grants import protect
 
 SERVERS = {"schools": schools.mcp, "directory": directory.mcp, "special": special.mcp}
 apps = {name: server.http_app(path="/", stateless_http=True) for name, server in SERVERS.items()}
@@ -24,4 +25,4 @@ def healthcheck() -> dict:
 
 
 for name, sub in apps.items():
-    app.mount(f"/{name}/mcp", sub)
+    app.mount(f"/{name}/mcp", protect(sub, name))  # every tools/call needs a gateway tool grant

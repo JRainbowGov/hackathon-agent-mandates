@@ -135,7 +135,8 @@ The agent never holds an approver key. URL and user code are only identifiers.
 
   Tool functions read the grant from the context variable. Before running, `check_args(grant, arguments)` re-checks `urn`, `pupil_id`, `pupil_ids` and constrained arguments, giving `GRANT_SCOPE`. This is the only school check for `roster` and `draft`, whose output has no URN. After running, one helper applies subjects, level and `max_rows`: `enforce(rows, grant, table)` for row lists, and `enforce_one` for single records.
 - **Seen `jti`s:** an in-memory set per server, kept for 60 s, twice the grant lifetime.
-- **Test bypass:** `TOOL_GRANTS=off` disables the middleware for local debugging. Compose sets `TOOL_GRANTS=enforce`, and the app refuses to start without one of the two values. Unit tests call tool functions in process, so they need neither.
+- **Test bypass:** `TOOL_GRANTS=off` disables the middleware for local debugging. Unset means `enforce`, and any other value stops the app from starting, so turning grants off always takes an explicit setting. Compose sets `TOOL_GRANTS=enforce`. Unit tests call tool functions in process, so they need neither.
+- **Key distribution:** `cli init` and `cli grant-key` (run by `make hack`, `make run` and `make grant_key`) create `tool_grant_key.pem` and `tool_grant.pub` in `gateway/state`. Compose mounts only the `.pub` into the servers. The gateway also creates the pair on startup if it's missing.
 - *Alternative:* put the grant inside the tool arguments. Rejected: the agent's arguments are then partly gateway-written, and the `args_hash` must exclude it.
 - *Alternative:* mTLS between gateway and servers. It proves who is calling but carries no scope. Complementary, and out of scope here.
 
