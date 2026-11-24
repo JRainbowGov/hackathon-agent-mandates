@@ -57,7 +57,7 @@ frontend/.astro/
 frontend/dist/
 
 # Gateway runtime state (private keys, audit log)
-gateway/state/*
+# gateway/state/*
 !gateway/state/.gitkeep
 gateway/audit/
 *.sqlite
