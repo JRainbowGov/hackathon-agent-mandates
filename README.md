@@ -66,6 +66,16 @@ when an agent asks for more access). To issue a mandate, make calls and revoke i
 `make test` and `make lint` run the tests and ruff. The data sources are listed in
 [mcp_server/data/synthetic/synthetic_manifest.json](mcp_server/data/synthetic/synthetic_manifest.json).
 
+## Walkthroughs and slides
+
+- [Presentation deck](https://claude.ai/artifact/9iSpYEoUbk9LvWbnTChyeC): the problem, the architecture, key decisions,
+  safe counts, run budgets, scope requests, the audit trail, and what is still open.
+- [Mandate flows](https://claude.ai/artifact/DzRWiBKjnYbQF2NW7QySha): an interactive walkthrough of receiving a token,
+  widening it, adding a new teacher, the requests behind each question, and where the counts differencing attack is
+  stopped.
+- [Attack kit](https://claude.ai/artifact/Mxx4ezhoV3sEaYCbZKkVUT): the Day 2 runbook for `day_2_attack/attack.py`, with
+  scoring and what each attack tries.
+
 ## Current flow architecture
 
 | Key | Who holds it | What it does |
