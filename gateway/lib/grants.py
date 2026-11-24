@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from . import audit, safe_counts
 from .audience import audience_pupils
 from .common import canonical, sha256_hex
-from .grant_words import grants_words, until
+from .grant_words import LEFT_OUT, grants_words, until
 from .graded import GRADED_SERVER, claimless_level
 from .interfaces import SERVER_LEVELS
 from .scope_math import Invalid, already_granted, validate_entry, validate_request
@@ -186,7 +186,8 @@ def _with_next(view: dict) -> dict:
             f"Approval needed (code {view['user_code']}): {view['summary']}\n"
             f"Open {view['approval_url']} and sign in with your approver key. Check the page shows code "
             f"{view['user_code']}. This request expires at {until(view['expires_at']).removeprefix('until ')}.\n"
-            'Replying "yes" here does not approve it.'
+            + ("Some values are shown only on the approval page.\n" if LEFT_OUT in view["summary"] else "")
+            + 'Replying "yes" here does not approve it.'
         )
     return view
 

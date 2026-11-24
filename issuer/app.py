@@ -33,7 +33,7 @@ from gateway.cli import _load_status, issue_mandate
 from gateway.lib.audit import sign_external_event
 from gateway.lib.common import canonical, jwk_to_pub, pub_to_pem, sha256_hex, verify_bytes
 from gateway.lib.gateway_verify import Reject, Request, verify_mandate
-from gateway.lib.grant_words import action_words, grants_words, marks_level_4
+from gateway.lib.grant_words import action_words, agent_values, grants_words, marks_level_4
 from gateway.lib.scope_math import (
     Invalid,
     already_granted,
@@ -160,6 +160,16 @@ def _held_union_scope(calls: list[dict]) -> list[dict]:
     return scope
 
 
+def values_of(held: list[dict] | None, scope: list[dict]) -> list[dict]:
+    """Every value the agent sent, per held call or scope entry, for the approval page to show verbatim
+    (quote-request-values): the summary leaves out whatever the gateway doesn't recognise."""
+    if held:
+        return [{"what": f"{c['server']}.{c['tool']}", "server": c["server"], "tool": c["tool"],
+                 "values": agent_values(c["server"], [c["tool"]], c["arguments"])} for c in held]  # fmt: skip
+    return [{"what": f"{e['server']}.{','.join(e['tools'])}", "server": e["server"], "tool": ",".join(e["tools"]),
+             "values": agent_values(e["server"], e["tools"], e.get("constraints", {}))} for e in scope]  # fmt: skip
+
+
 def held_words(calls: list[dict]) -> list[str]:
     return [action_words(c["server"], c["tool"], c["arguments"]) for c in calls]
 
@@ -254,6 +264,7 @@ def create_request(body: CreateBody):
             "parent_scope": claims.get("scope", []),
             "parent_budget": claims.get("budget"),  # run budgets: copied unchanged into what's minted
             "level_4": marks_level_4(scope, clearance if clearance is not None else claims.get("clearance")),
+            "values": values_of(held, scope),
         },
         request_key=request_key,
         held=held,
@@ -546,6 +557,7 @@ def request_view(rid: str, x_approver_session: str | None = Header(default=None)
             requested=r["requested"],
             agent_id=r["requester_agent_id"],
             agent_reason=r["reason"],  # the agent's own words: shown as plain text, never trusted
+            values=r["requested"].get("values"),  # every value the agent sent, shown verbatim (requests before: None)
             held_action=held_words(held_calls(r["held"]))[0] if len(held_calls(r["held"])) == 1 else None,
             held_actions=held_words(held_calls(r["held"])) if r["held"] else None,
         )

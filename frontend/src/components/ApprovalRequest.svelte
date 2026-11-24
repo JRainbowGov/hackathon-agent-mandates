@@ -21,6 +21,8 @@
     agent_reason?: string;
     held_action?: string | null;
     held_actions?: string[] | null;
+    // every name and value the agent sent, per held call or scope entry (quote-request-values); signed in only
+    values?: { what: string; values: { name: string; value: unknown; known: boolean }[] }[] | null;
   };
 
   let { requestId }: { requestId: string } = $props();
@@ -35,6 +37,12 @@
 
   const TTL_CHOICES = [300, 900, 1800, 3600, 7200, 14400, 28800, 86400];
   const ttlLabel = (s: number) => (s % 3600 === 0 ? `${s / 3600} hour${s === 3600 ? '' : 's'}` : `${s / 60} minutes`);
+  // a value exactly as sent: JSON shows line breaks and control characters as escapes, and Svelte text keeps any
+  // markup literal. A string loses only its outer quotes.
+  const literal = (v: unknown) => {
+    const json = JSON.stringify(v) ?? String(v);
+    return typeof v === 'string' ? json.slice(1, -1) : json;
+  };
   const expires = (t: number) => new Date(t * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
   async function load() {
@@ -171,6 +179,29 @@
     <p class="govuk-hint">These are the agent's own words. Decide on what it's asking for above, not on this.</p>
   {/if}
 
+  {#if view.values?.length}
+    <h2 class="govuk-heading-s">Values sent by the agent</h2>
+    <p class="govuk-hint">Shown exactly as sent. The summary above leaves out any it doesn't recognise.</p>
+    {#each view.values as item, i (i)}
+      <table class="govuk-table agent-values">
+        <caption class="govuk-table__caption govuk-table__caption--s"><code>{item.what}</code></caption>
+        <tbody class="govuk-table__body">
+          {#each item.values as v (v.name)}
+            <tr class="govuk-table__row">
+              <th scope="row" class="govuk-table__header"><code>{literal(v.name)}</code></th>
+              <td class="govuk-table__cell">
+                <code class="agent-value">{literal(v.value)}</code>
+                {#if !v.known}
+                  <p class="govuk-error-message govuk-!-margin-bottom-0">Not a parameter of {item.what}; the call will fail.</p>
+                {/if}
+              </td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    {/each}
+  {/if}
+
   {#if !view.signed_in_as}
     <div class="govuk-inset-text">
       Only {view.principal} can decide this, signed in with their approver key. Run
@@ -225,4 +256,5 @@
   .approval-code { background: #1d70b8; color: #fff; padding: 15px 20px; }
   .approval-code__value { color: #fff; letter-spacing: 0.08em; font-family: monospace; }
   .agent-words { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .agent-value { white-space: pre-wrap; overflow-wrap: anywhere; }
 </style>

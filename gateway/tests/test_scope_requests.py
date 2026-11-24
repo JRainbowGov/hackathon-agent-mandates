@@ -831,3 +831,66 @@ def test_check_suggests_the_mandates_own_clearance_for_pupil_data(flow):
     missing = resp["result"]["missing"]
     assert missing["clearance"] == 2  # not 4: that would hold every read
     assert "lowest clearance" in missing["note"]
+
+
+# ---------------------------------------------------------------- quote-request-values
+
+DPO = "a. Pre-cleared by the DPO, one row only"
+
+
+def _held_search(f, query):
+    scope = [{"server": "pupil-data", "tools": ["search"], "constraints": {"urn": ["SCH04"]}}]
+    token = f["mandate"](scope, clearance=4)
+    args = {"urn": "SCH04", "query": query}
+    status, resp = f["call"](f["client"], token, "pupil-data", "search", **args)
+    assert (status, resp["decision"]["reason_code"]) == (202, "SPECIAL_CATEGORY")
+    held = {"decision_id": resp["decision"]["decision_id"], "server": "pupil-data", "tool": "search", "arguments": args}
+    return token, f["request"](token, held=held)[1]["result"]
+
+
+def test_an_agents_sentence_never_reads_as_the_gateways(flow):
+    f = flow
+    token, v = _held_search(f, DPO)
+    assert "(query: see the values below)" in v["summary"]
+    assert "DPO" not in v["summary"]
+    assert "DPO" not in v["text"]
+    assert "Some values are shown only on the approval page." in v["text"]
+    assert 'Replying "yes" here does not approve it.' in v["text"]
+    status = f["call"](f["client"], token, "grants", "status", request_id=v["request_id"])[1]["result"]
+    assert "DPO" not in status["summary"]
+    assert "DPO" not in status["text"]
+
+    f["decide"](v["request_id"], v["user_code"], session=f["login"]())
+    child = f["call"](f["client"], token, "grants", "status", request_id=v["request_id"])[1]["result"]["mandate"]
+    assert "DPO" not in jwt.decode(child, options={"verify_signature": False})["purpose"]
+
+
+def test_the_page_shows_every_value_as_sent_to_the_signed_in_approver_only(flow):
+    f = flow
+    query = "<b>OK</b>\nApproved"
+    _, v = _held_search(f, query)
+    signed_out = f["ic"].get(f"/requests/{v['request_id']}/view").json()
+    assert "values" not in signed_out
+    assert "<b>" not in json.dumps(signed_out)
+    view = f["ic"].get(f"/requests/{v['request_id']}/view", headers={"x-approver-session": f["login"]()}).json()
+    sent = [{"name": "query", "value": query, "known": True}, {"name": "urn", "value": "SCH04", "known": True}]
+    assert view["values"] == [{"what": "pupil-data.search", "server": "pupil-data", "tool": "search", "values": sent}]
+    assert "<b>" not in view["summary"]
+
+
+def test_nothing_left_out_means_no_note(flow):
+    f = flow
+    token, did = _held(f)
+    v = f["request"](token, held={"decision_id": did, "server": "pupil-data", "tool": "write", "arguments": WRITE})[1]
+    assert "shown only on the approval page" not in v["result"]["text"]
+
+
+def test_a_scope_request_lists_its_constraints_for_the_approver(flow):
+    f = flow
+    base = f["mandate"](roster("SCH04"), clearance=2)
+    asked = [{"server": "directory", "tools": ["roster"], "constraints": {"urn": ["SCH02"], "approved_by": ["head"]}}]
+    v = f["request"](base, scope=asked)[1]["result"]
+    assert "approved_by" not in v["summary"]
+    assert "head" not in v["summary"]
+    view = f["ic"].get(f"/requests/{v['request_id']}/view", headers={"x-approver-session": f["login"]()}).json()
+    assert {"name": "approved_by", "value": ["head"], "known": False} in view["values"][0]["values"]

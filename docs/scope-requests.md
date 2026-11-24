@@ -85,6 +85,15 @@ uv run python -m gateway.cli approve sr_BYiYCNzhNgCG --principal officer:jsmith 
   --approver-key jsmith-approver.pem --user-code 9YN3-EE4J
 ```
 
+The summary only ever reads as the gateway's words (quote-request-values). A value the agent sent appears in it
+only if the gateway recognises it: a school it can name, a pupil ID, a data column, table or file, a year group,
+academic year or term, or a short token (16 letters, digits or `_ . / -`, no spaces). Anything else, such as a search
+query that is a sentence, is left out as `(query: see the values below)`. An argument or constraint the tool doesn't
+take is never named, only counted: `(and 1 other argument: see the values below)`. Signed in, the page lists every
+value under "Values sent by the agent", exactly as sent, with line breaks shown as `\n` and unknown names marked "the
+call will fail". When anything was left out, the agent's `text` says "Some values are shown only on the approval
+page."
+
 Holding the URL or the code isn't enough to approve. Only the principal's approver key decides, and the issuer
 checks it, not the page.
 
