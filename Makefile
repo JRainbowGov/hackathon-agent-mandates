@@ -1,6 +1,12 @@
 -include .env
 export
 
+# Where approvers open the approval page: the issuer builds every approval_url from FRONTEND_URL, and the UI is built
+# to answer under PUBLIC_BASE_PATH (docs/deploy.md). On a deployment, set FRONTEND_URL in .env or the shell, e.g.
+# FRONTEND_URL=https://<host>/frontend. The default is the local UI (it answers with or without the prefix).
+PUBLIC_BASE_PATH ?= /frontend
+FRONTEND_URL ?= http://localhost:8081$(PUBLIC_BASE_PATH)
+
 # Docker image, terraform and release targets live in platform.mk. Teams never need them.
 -include platform.mk
 
@@ -32,6 +38,10 @@ stop:
 
 gateway_init:  ## Generate gateway keys, trusted list and status list in gateway/state
 	uv run python -m gateway.cli init
+
+approver_login:  ## One-time approval-page sign-in link at FRONTEND_URL: make approver_login PRINCIPAL=officer:jsmith KEY=jsmith-approver.pem [REQUEST=sr_...]
+	uv run python -m gateway.cli approver-login --principal $(PRINCIPAL) --approver-key $(KEY) --ui $(FRONTEND_URL) \
+		$(if $(REQUEST),--request $(REQUEST))
 
 grant_key:  ## Make sure the tool-grant key exists (the MCP servers mount its public half)
 	uv run python -m gateway.cli grant-key

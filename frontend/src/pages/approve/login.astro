@@ -2,6 +2,7 @@
 // One-time login link from `cli approver-login`: the token is signed with the person's approver key. The issuer
 // checks it and returns a short session, kept in an HTTP-only cookie the browser can't read.
 import Layout from "@layouts/Layout.astro";
+import { withBase } from "../../lib/paths";
 
 const token = Astro.url.searchParams.get("token") ?? "";
 const next = Astro.url.searchParams.get("next") ?? "";
@@ -21,10 +22,10 @@ if (token) {
       httpOnly: true,
       sameSite: "strict",
       secure: Astro.url.protocol === "https:",
-      path: "/api/approve",
+      path: withBase("/api/approve"),
       expires: new Date(body.expires * 1000),
     });
-    if (safeNext) return Astro.redirect(safeNext);
+    if (safeNext) return Astro.redirect(withBase(safeNext));
   } else {
     error = body.detail || body.error || "This login link didn't work.";
   }

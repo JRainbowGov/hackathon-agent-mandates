@@ -2,6 +2,7 @@
 import "../styles/idotai.scss";
 import "../styles/global.scss";
 import { Header, Footer, SkipLink } from "@i-dot-ai-npm/component-library-svelte";
+import { withBase } from "../lib/paths";
 ---
 
 <!doctype html>
@@ -9,7 +10,7 @@ import { Header, Footer, SkipLink } from "@i-dot-ai-npm/component-library-svelte
 	<head>
 		<meta charset="UTF-8" />
 		<meta name="viewport" content="width=device-width" />
-		<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+		<link rel="icon" type="image/svg+xml" href={withBase("/favicon.svg")} />
 		<title>Joint Technical Hackathon: Agentic Mandates</title>
 	</head>
 	<body class="govuk-template__body">
@@ -21,7 +22,7 @@ import { Header, Footer, SkipLink } from "@i-dot-ai-npm/component-library-svelte
 					: "");
 		</script>
 		<SkipLink href="#main-content">Skip to main content</SkipLink>
-		<Header href="/">
+		<Header href={withBase("/")}>
 			<svg
 				xmlns="http://www.w3.org/2000/svg"
 				width="28"

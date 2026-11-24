@@ -29,6 +29,9 @@ services:
     build:
       context: .
       dockerfile: ./frontend/Dockerfile
+      args:
+        # serve the UI under a path prefix, e.g. /frontend; set FRONTEND_URL to match (docs/deploy.md)
+        - PUBLIC_BASE_PATH=${PUBLIC_BASE_PATH:-}
     container_name: svelte
     ports:
       - "8081:8081"
