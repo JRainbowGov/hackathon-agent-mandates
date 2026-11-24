@@ -31,7 +31,7 @@ def pupil_mandate(state, out, *, urn="SCH05", claims=None, rate=None):
     entry = {"server": "pupil-data", "tools": ["pupil", "search"], "constraints": {"urn": [urn]}}
     if rate:
         entry["rate"] = rate
-    return issue(state, out, scope=[entry], claims=claims)
+    return issue(state, out, scope=[entry], claims={"clearance": 3, **(claims or {})})  # person tools need one
 
 
 def set_limits(**overrides):

@@ -25,6 +25,7 @@ import jwt
 from .common import canonical, jwk_thumbprint, jwk_to_pub, pub_to_pem, sha256_hex, verify_bytes
 from .audience import check_audience
 from .grants import GRANTS_SERVER, GRANTS_TOOLS
+from .graded import special_category_read
 from .interfaces import check_clearance
 from .status_list import is_revoked
 
@@ -195,7 +196,7 @@ def check_request(
         if fnmatch.fnmatch(name, pat):
             return "DENY", "DENIED_BY_RULE", pat
     # clearance before scope, so no shape of scope entries can route around it
-    if refused := check_clearance(req.server, claims):
+    if refused := check_clearance(req.server, claims, req.tool):
         return refused
     # the gateway's own grants server needs no scope entry: it only ever concerns the calling mandate
     if req.server == GRANTS_SERVER:
@@ -231,6 +232,9 @@ def check_request(
                 return "DENY", "TOO_MUCH", "empty query matches every row"
             if matched is not None:
                 matched.append(entry)
+            # special category is asked for call by call (add-graded-pupil-data)
+            if special_category_read(req.server, req.tool, req.arguments, claims):
+                return "STEP_UP", "SPECIAL_CATEGORY", f"{req.server}.{req.tool} returns level 4 data"
             for pat in step_up_patterns:
                 if fnmatch.fnmatch(name, pat):
                     return "STEP_UP", "SENSITIVE_TOOL", pat

@@ -17,9 +17,13 @@ SERVER_LEVELS: dict[str, int] = {
 
 # Servers that keep today's behaviour for mandates without a clearance claim (the eval, Day 2's default mandate).
 LEGACY_SERVERS = frozenset({"pupil-data"})
+# Servers whose results are stripped to the clearance instead of refused below their level (add-graded-pupil-data)
+GRADED_SERVERS = frozenset({"pupil-data"})
+# pupil-data tools that name or act on individual pupils: they need a clearance claim
+PERSON_TOOLS = frozenset({"pupil", "roster", "draft", "write"})
 
 
-def check_clearance(server: str, claims: dict) -> tuple[str, str, str] | None:
+def check_clearance(server: str, claims: dict, tool: str | None = None) -> tuple[str, str, str] | None:
     """A DENY (decision, reason_code, detail), or None when the clearance allows this server.
 
     `claims` must be the verified mandate claims: clearance is never read from the request.
@@ -29,12 +33,16 @@ def check_clearance(server: str, claims: dict) -> tuple[str, str, str] | None:
         return "DENY", "UNKNOWN_SERVER", server
     if "clearance" not in claims:
         if server in LEGACY_SERVERS:
+            if tool in PERSON_TOOLS:
+                return "DENY", "CLEARANCE_MISSING", f"{server}.{tool} names pupils; the mandate has no clearance"
             return None
         return "DENY", "CLEARANCE_MISSING", f"{server} is level {level}; the mandate has no clearance"
     clearance = claims["clearance"]
     # bool is a subclass of int, so `true` would otherwise pass as clearance 1
     if type(clearance) is not int or not 1 <= clearance <= 4:
         return "DENY", "CLEARANCE_INVALID", repr(clearance)
+    if server in GRADED_SERVERS:
+        return None  # any clearance may call it; its results are stripped to the clearance
     if level > clearance:
         return "DENY", "CLEARANCE_TOO_LOW", f"{server} is level {level}, clearance is {clearance}"
     return None

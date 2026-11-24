@@ -66,6 +66,7 @@ def test_every_call_writes_one_event_with_matching_decision_id(gw):  # noqa: F81
         "write.jwt",
         deny=[],
         scope=[{"server": "pupil-data", "tools": ["write"], "constraints": {"urn": ["SCH04"]}}],
+        claims={"clearance": 3},
     )
     write = caller(state, write_mandate)
 

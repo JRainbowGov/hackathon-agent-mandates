@@ -220,9 +220,10 @@ def test_issue_with_claims_of_your_own(gw, tmp_path, capsys):
     # the gateway ignores a claim it does not read, so the mandate still works
     assert search_with(out.read_text()) == (200, "IN_SCOPE")
 
-    # clearance is read (add-interface-slices): pupil-data is level 4, so clearance 2 can't use it
+    # clearance is read (add-interface-slices); pupil-data is graded (add-graded-pupil-data): clearance 2 is
+    # served, stripped to level 2
     cli.main([*issue, "--claims", '{"clearance": 2}'])
-    assert search_with(out.read_text()) == (403, "CLEARANCE_TOO_LOW")
+    assert search_with(out.read_text()) == (200, "IN_SCOPE")
 
     with pytest.raises(ValueError, match="scope"):
         cli.main([*issue, "--claims", '{"scope": []}'])

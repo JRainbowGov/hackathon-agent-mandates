@@ -56,6 +56,10 @@ def check(arguments: dict, claims: dict | None) -> tuple[str, str] | None:
     for column in named:
         if column_level(column) >= 4 and not cleared_4:  # noqa: PLR2004
             return "COUNT_COLUMN_REFUSED", column
+    if type(clearance) is int and 1 <= clearance < 4:  # noqa: PLR2004  (graded pupil-data: counts stay within it)
+        for column in named:
+            if column_level(column) > clearance:
+                return "COUNT_COLUMN_REFUSED", f"{column} is above clearance {clearance}"
     if len(group_by) > MAX_GROUP_COLUMNS:
         return "COUNT_TOO_FINE", f"at most {MAX_GROUP_COLUMNS} group_by columns"
     for column in where:

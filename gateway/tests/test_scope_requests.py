@@ -717,3 +717,22 @@ def test_the_agent_is_told_to_batch(flow):
     check = f["call"](f["client"], token, "grants", "check", args=held_call)[1]["result"]
     assert "one list" in check["missing"]["held"]
     assert routes_mcp  # the tool module is the one the gateway forwards to
+
+
+def test_special_category_read_released_once(flow):
+    """add-graded-pupil-data: a level 4 read at clearance 4 is held, and approval releases it exactly once."""
+    f = flow
+    scope = [{"server": "pupil-data", "tools": ["pupil"], "constraints": {"urn": ["SCH04"]}}]
+    token = f["mandate"](scope, clearance=4)
+    args = {"pupil_id": "P0011", "urn": "SCH04"}
+    status, resp = f["call"](f["client"], token, "pupil-data", "pupil", **args)
+    assert (status, resp["decision"]["reason_code"]) == (202, "SPECIAL_CATEGORY")
+    held = {"decision_id": resp["decision"]["decision_id"], "server": "pupil-data", "tool": "pupil", "arguments": args}
+    v = f["request"](token, held=held)[1]["result"]
+    f["decide"](v["request_id"], v["user_code"], session=f["login"]())
+    child = f["call"](f["client"], token, "grants", "status", request_id=v["request_id"])[1]["result"]["mandate"]
+    status, resp = f["call"](f["client"], child, "pupil-data", "pupil", **args)
+    assert (status, resp["decision"]["reason_code"]) == (200, "PREAPPROVED")
+    assert "Ethnicity" in resp["result"]
+    status, resp = f["call"](f["client"], child, "pupil-data", "pupil", **args)
+    assert (status, resp["decision"]["reason_code"]) == (202, "SPECIAL_CATEGORY")

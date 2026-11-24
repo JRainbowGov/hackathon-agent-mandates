@@ -1,0 +1,38 @@
+## Purpose
+
+Makes a mandate's clearance decide which `pupil-data` columns an agent receives, and makes special category data something a person approves call by call, so default permissions get basic data only.
+
+## ADDED Requirements
+
+### Requirement: pupil-data results are stripped to the clearance
+For a mandate with `clearance` from 1 to 3, a `pupil-data` call allowed by scope SHALL return no column whose data level, by the manifest's classification, is above the clearance. The tool grant SHALL carry the clearance as its level, so the MCP server removes those columns, and the gateway SHALL remove them again before releasing the result. A column the manifest doesn't list counts as level 4.
+
+#### Scenario: Clearance 2 gets names, not sensitive fields
+- **WHEN** a mandate with `clearance: 2` and scope `[{"server": "pupil-data", "tools": ["pupil"], "constraints": {"urn": ["SCH02"]}}]` calls `pupil-data.pupil(pupil_id="P0050", urn="SCH02")`
+- **THEN** the gateway returns `200 ALLOW` with the record's `DisplayName`, `Gender` and deprivation fields, and without `Ethnicity`, `InCareAtCurrentSchool`, `FSMeligible` or `Language`
+
+#### Scenario: Clearance 3 adds free school meals
+- **WHEN** the same call is made with `clearance: 3`
+- **THEN** the record includes `FSMeligible` and `Language`, and not `Ethnicity` or `InCareAtCurrentSchool`
+
+### Requirement: Special category reads are held for approval
+For a mandate with `clearance: 4`, a `pupil-data` call that returns level-4 columns (`search`, `pupil`, or `get` of the census file) SHALL be held with `202 STEP_UP` and reason `SPECIAL_CATEGORY`, unless the mandate pre-approves that exact call. A pre-approved call SHALL be allowed once with reason `PREAPPROVED`.
+
+#### Scenario: Ethnicity needs a person
+- **WHEN** a mandate with `clearance: 4` and the scope above calls `pupil-data.pupil(pupil_id="P0050", urn="SCH02")`
+- **THEN** the gateway returns `202 STEP_UP` with reason `SPECIAL_CATEGORY` and no record
+
+#### Scenario: Approved once
+- **WHEN** a person approved that held call through `grants.request`, and the agent retries it with the minted mandate
+- **THEN** the record is returned once with reason `PREAPPROVED`, and a second identical call is held again
+
+### Requirement: Person-level tools need a clearance claim
+A mandate with no `clearance` claim calling `pupil-data.pupil`, `pupil-data.roster`, `pupil-data.draft` or `pupil-data.write` MUST be refused with `403 CLEARANCE_MISSING`, after `deny` rules. Its `search`, `get` and `aggregate` calls SHALL behave as before.
+
+#### Scenario: The P0050 call without clearance
+- **WHEN** a mandate with no `clearance` and scope allowing `pupil` at `SCH02` calls `pupil-data.pupil(pupil_id="P0050", urn="SCH02")`
+- **THEN** the gateway returns `403 DENY` with reason `CLEARANCE_MISSING` and no record
+
+#### Scenario: The eval is unchanged
+- **WHEN** `make eval_run` runs
+- **THEN** it passes 32/32 and question 0 12/12

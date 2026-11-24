@@ -29,7 +29,8 @@ SCH04_Y11 = {"urn": "SCH04", "year_group": 11, "academic_year": "2023/24", "term
         ("census", {"clearance": 4}, "UNKNOWN_SERVER"),
         ("census", {}, "UNKNOWN_SERVER"),
         ("directory", {"clearance": 1}, "CLEARANCE_TOO_LOW"),
-        ("pupil-data", {"clearance": 3}, "CLEARANCE_TOO_LOW"),
+        ("pupil-data", {"clearance": 3}, None),  # graded, not refused (add-graded-pupil-data)
+        ("pupil-data", {"clearance": 1}, None),
         ("directory", {"clearance": 2}, None),
         ("special", {"clearance": 4}, None),
     ],
@@ -121,10 +122,11 @@ def test_malformed_clearance(gw):
 
 
 def test_pupil_data_refused_below_clearance_4(gw):
+    """Kept by name: since add-graded-pupil-data, clearance 3 is served, stripped to level 3."""
     client, mandate, call = gw
     scope = [{"server": "pupil-data", "tools": ["search"], "constraints": {"urn": ["SCH04"]}}]
     status, resp = call(client, mandate(scope, clearance=3), "pupil-data", "search", query="P0011", urn="SCH04")
-    assert (status, resp["decision"]["reason_code"]) == (403, "CLEARANCE_TOO_LOW")
+    assert (status, resp["decision"]["reason_code"]) == (200, "IN_SCOPE")
 
 
 def test_clearance_never_widens_scope(gw):

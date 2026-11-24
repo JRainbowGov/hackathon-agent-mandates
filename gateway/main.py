@@ -23,7 +23,7 @@ from fastmcp.exceptions import ToolError
 from pydantic import BaseModel
 
 from gateway.cli import sign_request
-from gateway.lib import audit, budgets, grants, safe_counts
+from gateway.lib import audit, budgets, graded, grants, safe_counts
 from gateway.lib.common import generate_keypair, pub_to_jwk
 from gateway.lib.gateway_verify import AuditContext, Gateway, Request
 from gateway.lib.grant_issue import BREAKDOWN_MAX_ROWS, grant_for
@@ -292,6 +292,9 @@ async def _allowed(limits: budgets.State, decision, ctx, plan, body: CallBody, *
                 decision = _deny(decision, *by_grants)
         else:
             status, data, error = await _forward(body, ctx, decision_id, safe_counts.k_for(ctx.claims))
+            # graded pupil-data: never more than the clearance, even if the server sent it (add-graded-pupil-data)
+            if status == HTTPStatus.OK and not counts and (level := graded.level_for(body.server, ctx.claims)):
+                data = graded.strip(data, level)
         min_level = safe_counts.max_level(body.arguments) if counts else None
         summary = audit.summarise(data, body.server, min_level=min_level) if status == HTTPStatus.OK else None
         if summary is not None and (over := await _pupil_budget(limits, plan, summary)):
