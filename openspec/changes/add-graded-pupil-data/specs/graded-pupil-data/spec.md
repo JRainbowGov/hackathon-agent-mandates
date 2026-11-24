@@ -27,7 +27,7 @@ For a mandate with `clearance: 4`, a `pupil-data` call that returns level-4 colu
 - **THEN** the record is returned once with reason `PREAPPROVED`, and a second identical call is held again
 
 ### Requirement: Person-level tools need a clearance claim
-A mandate with no `clearance` claim calling `pupil-data.pupil`, `pupil-data.roster`, `pupil-data.draft` or `pupil-data.write` MUST be refused with `403 CLEARANCE_MISSING`, after `deny` rules. Its `search`, `get` and `aggregate` calls SHALL behave as before.
+A mandate with no `clearance` claim calling `pupil-data.pupil`, `pupil-data.roster`, `pupil-data.draft` or `pupil-data.write` MUST be refused with `403 CLEARANCE_MISSING`, after `deny` rules. Its `search`, `get` and `aggregate` calls SHALL be decided as before; what they release is set by the next requirement.
 
 #### Scenario: The P0050 call without clearance
 - **WHEN** a mandate with no `clearance` and scope allowing `pupil` at `SCH02` calls `pupil-data.pupil(pupil_id="P0050", urn="SCH02")`
@@ -36,3 +36,14 @@ A mandate with no `clearance` claim calling `pupil-data.pupil`, `pupil-data.rost
 #### Scenario: The eval is unchanged
 - **WHEN** `make eval_run` runs
 - **THEN** it passes 32/32 and question 0 12/12
+
+### Requirement: No clearance means basic data
+A `pupil-data` result for a mandate with no `clearance` claim SHALL be stripped at the gateway to the claim-less level: `GATEWAY_CLAIMLESS_LEVEL` when it is an integer from 1 to 4, else 2. A missing or invalid setting SHALL fall back to 2, never to 4. Safe counts SHALL NOT be stripped, because they release only rounded aggregates. The audit event SHALL record the stripped result.
+
+#### Scenario: Claim-less search of one pupil
+- **WHEN** a mandate with no `clearance` and scope allowing `search` at `SCH02` calls `pupil-data.search(query="P0050", urn="SCH02")`
+- **THEN** the gateway returns `200 ALLOW` with P0050's rows, none containing `Ethnicity`, `InCareAtCurrentSchool`, `FSMeligible` or `Language`, and the audit event's `max_pii_level` is 2
+
+#### Scenario: Claim-less free school meal counts
+- **WHEN** the eval's counts mandate (no `clearance`) asks for free school meal numbers by school
+- **THEN** the counts are released as before

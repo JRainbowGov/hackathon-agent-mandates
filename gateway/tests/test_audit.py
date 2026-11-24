@@ -149,8 +149,9 @@ def test_what_came_back_is_recorded(gw):  # noqa: F811
     search, schools = all_events()
     assert search["rows_returned"] == len(r.json()["result"])
     assert search["pupil_ids_returned"] == ["P0004"]
-    assert search["max_pii_level"] == 4
-    assert "Ethnicity" in search["columns_returned"]
+    # a claim-less mandate gets basic data only (add-graded-pupil-data), and the log records what was released
+    assert search["max_pii_level"] == 2
+    assert "Ethnicity" not in search["columns_returned"]
     assert schools["rows_returned"] == 12
     assert schools["pupil_ids_returned"] == []
     assert schools["max_pii_level"] == 1
@@ -295,10 +296,10 @@ def test_saw_after_revoke_and_never_used(gw):  # noqa: F811
     out = read(client, "audit", "saw", jti=jti).json()["result"]
     assert out["revoked"] is True
     assert out["calls"]["allowed"] == 3
-    assert out["max_pii_level"] == 4
+    assert out["max_pii_level"] == 2  # claim-less: stripped to basic data
     assert out["pupil_ids"] == sorted(seen)
     assert out["schools"] == ["SCH01"]
-    assert out["summary"].startswith("Before it was revoked, this access returned records including special category")
+    assert out["summary"].startswith("Before it was revoked, this access returned basic personal data such as names")
 
     unused = issue(state, "unused.jwt")
     out = reader(state, jti=claims_of(unused)["jti"])(client, "audit", "saw", jti=claims_of(unused)["jti"])
@@ -326,7 +327,7 @@ def test_history_counts_verified_events_only(gw):  # noqa: F811
     assert h.reasons == {"IN_SCOPE": 1, "CONSTRAINT_VIOLATED": 2}
     assert h.refusals_in_a_row == 2
     assert h.distinct_pupils == 1
-    assert h.max_pii_level == 4
+    assert h.max_pii_level == 2  # claim-less: stripped to basic data
     assert h.first_ts <= h.last_ts
 
 

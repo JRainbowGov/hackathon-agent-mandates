@@ -46,10 +46,37 @@ def test_claimless_person_tool_is_refused(stack):
     assert "result" not in resp
 
 
-def test_claimless_search_keeps_legacy_behaviour(stack):
+def test_claimless_search_gets_basic_data_only(stack):
     client, mandate, call, _ = stack
-    status, _ = call(client, mandate(SCH02), "pupil-data", "search", query="P0050", urn="SCH02")
+    status, resp = call(client, mandate(SCH02), "pupil-data", "search", query="P0050", urn="SCH02")
     assert status == 200
+    assert resp["result"]
+    assert not any(set(row) & (LEVEL_3 | LEVEL_4) for row in resp["result"])
+
+
+def test_claimless_get_of_census_is_stripped(stack):
+    client, mandate, call, _ = stack
+    files = [{"server": "pupil-data", "tools": ["get"]}]
+    status, resp = call(client, mandate(files), "pupil-data", "get", path=graded.CENSUS_FILE, limit=5)
+    assert status == 200
+    assert resp["result"]
+    assert not any(set(row) & (LEVEL_3 | LEVEL_4) for row in resp["result"])
+
+
+def test_claimless_counts_still_work(stack):
+    client, mandate, call, _ = stack
+    scope = [{"server": "pupil-data", "tools": ["aggregate"]}]
+    args = {"table": "personal_data_school_census", "group_by": ["URN"], "measure": "FSMeligible"}
+    status, resp = call(client, mandate(scope), "pupil-data", "aggregate", **args)
+    assert status == 200
+    assert any(row.get("count") for row in resp["result"])  # counts are aggregates: not stripped
+
+
+@pytest.mark.parametrize(("raw", "level"), [("", 2), ("3", 3), ("4", 4), ("9", 2), ("x", 2), ("0", 2)])
+def test_claimless_level_setting(monkeypatch, raw, level):
+    monkeypatch.setenv("GATEWAY_CLAIMLESS_LEVEL", raw)
+    assert graded.claimless_level() == level
+    assert graded.level_for("pupil-data", {}) == (None if level == 4 else level)
 
 
 @pytest.mark.parametrize("tool", ["pupil", "search"])

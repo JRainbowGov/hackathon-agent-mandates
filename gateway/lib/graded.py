@@ -10,6 +10,7 @@ so a result never leaves with more than the mandate's clearance even if the serv
 
 from __future__ import annotations
 
+import os
 import posixpath
 from typing import Any
 
@@ -19,6 +20,14 @@ GRADED_SERVER = "pupil-data"
 CENSUS_FILE = "synthetic/synthetic_personal_data_school_census.csv"
 # pupil-data tools whose results include level-4 census columns
 SPECIAL_CATEGORY_TOOLS = frozenset({"search", "pupil"})
+# what a mandate without a clearance claim receives from pupil-data: basic PII (names, gender, age, deprivation)
+DEFAULT_CLAIMLESS_LEVEL = 2
+
+
+def claimless_level() -> int:
+    """GATEWAY_CLAIMLESS_LEVEL (1-4), else the default. A bad value falls back to the default, never to 4."""
+    raw = os.environ.get("GATEWAY_CLAIMLESS_LEVEL", "")
+    return int(raw) if raw.isdigit() and 1 <= int(raw) <= 4 else DEFAULT_CLAIMLESS_LEVEL  # noqa: PLR2004
 
 
 def _clearance(claims: dict | None) -> int | None:
@@ -39,9 +48,18 @@ def special_category_read(server: str, tool: str, arguments: dict, claims: dict 
 
 
 def level_for(server: str, claims: dict | None) -> int | None:
-    """The level a graded server's result is stripped to: the clearance, or None (nothing to strip)."""
-    clearance = _clearance(claims)
-    return clearance if server == GRADED_SERVER and clearance is not None and clearance < 4 else None  # noqa: PLR2004
+    """The level a graded server's result is stripped to, or None (nothing to strip).
+
+    The clearance; without a clearance claim, the claim-less level (add-graded-pupil-data: claim-less mandates
+    keep working, with basic data only).
+    """
+    if server != GRADED_SERVER:
+        return None
+    if "clearance" not in (claims or {}):
+        level = claimless_level()
+    else:
+        level = _clearance(claims)
+    return level if level is not None and level < 4 else None  # noqa: PLR2004
 
 
 def _strip_row(row: dict, level: int) -> dict:
