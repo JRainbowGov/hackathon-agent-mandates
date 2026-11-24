@@ -126,6 +126,18 @@ A mandate with `"can_delegate": true` can approve a helper's request with `grant
 own scope and clearance cover. Anything wider is refused with `EXCEEDS_SUPERVISOR` and waits for the person. An
 agent can't approve its own request (`SELF_APPROVAL`).
 
+What a supervisor approves is tied to it. The minted mandate's `approved_by` carries the supervisor's status
+entry, and the gateway checks it on every call: revoke the supervisor and everything it approved stops with
+`APPROVER_REVOKED`. A minted mandate never outlives the supervisor that approved it, either.
+
+## Seeing approvals together
+
+Signed in, the approval page lists the earlier approvals for the same mandate that still work, under "Also
+approved earlier, still active". Ten narrow asks read as their total, not as ten small things. The words for a grant
+never say less than is enforced: an entry with no school constraint says "at every school", and row caps and call
+rates are shown. Once a person approves less than was asked, the agent's `grants.status` summary and the minted
+mandate's `purpose` describe what was approved.
+
 ## The gateway-to-tool hop
 
 The MCP servers no longer trust whoever reaches them. Each forwarded call carries a tool grant, signed by the gateway
@@ -136,11 +148,15 @@ seconds and one use. A call straight to `:8080` gets `GRANT_MISSING`. A server r
 ## Audit
 
 Every `grants.*` call is a normal audited tool call. The issuer sends `approval_requested`, `approval_granted`,
-`approval_denied` and `approval_expired` events, signed with its key, into the same hash chain.
+`approval_denied` and `approval_expired` events, signed with its key, into the same hash chain. An
+`approval_granted` event names the mandate it minted (`minted_jti`).
 
 ## Still unresolved
 
 - Approvers are a key file per person, not SSO or a passkey.
 - The person's ceiling is a JSON file, not a real entitlement source.
-- The chain doesn't yet record which mandate an approval minted. The audit event has no field for it.
 - The issuer and `cli issue` both write `status_list.json`, with no lock between them.
+- A helper still needs an original mandate of its own before it can ask; a parent agent can't hand a narrowed
+  grant to a new key.
+- Only the principal can approve, with nobody to cover when they're away, and one approval is enough even for
+  special category data or a write.

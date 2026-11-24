@@ -37,6 +37,8 @@ TOOL_WORDS = {
     ("audit", "saw"): "See what an agent received",
 }
 LEVEL_4_SERVERS = {"pupil-data", "special"}
+# tools whose data belongs to a school: without a urn constraint they reach all twelve
+PER_SCHOOL_TOOLS = {"search", "aggregate", "roster", "pupil", "draft", "write", "name", "record"}
 
 
 @lru_cache
@@ -68,12 +70,25 @@ def entry_words(entry: dict) -> str:
     constraints = entry.get("constraints", {})
     if urns := constraints.get("urn"):
         parts.append("at " + _join([school(str(u)) for u in urns]))
+    elif set(tools) & PER_SCHOOL_TOOLS:
+        # saying nothing would read as narrower than what is enforced
+        parts.append("at every school")
     others = {k: v for k, v in constraints.items() if k != "urn"}
     for k, values in others.items():
         parts.append(f"where {k} is " + _join([str(v) for v in values]))
     pupils = (entry.get("audience") or {}).get("pupils")
     if isinstance(pupils, list):
         parts.append(f"for {len(pupils)} named pupil" + ("" if len(pupils) == 1 else "s"))
+    if type(max_rows := entry.get("max_rows")) is int:
+        parts.append(f"(at most {max_rows} rows a call)")
+    if isinstance(rate := entry.get("rate"), dict):
+        limits = []
+        if "per_minute" in rate:
+            limits.append(f"at most {rate['per_minute']} calls a minute")
+        if "max_calls" in rate:
+            limits.append(f"{rate['max_calls']} calls in all")
+        if limits:
+            parts.append("(" + ", ".join(limits) + ")")
     return " ".join(parts)
 
 
