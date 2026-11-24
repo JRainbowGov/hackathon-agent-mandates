@@ -150,6 +150,18 @@ class Store:
         ).fetchall()
         return [self._row(r) for r in rows]
 
+    def approved_for(self, requester_jti: str) -> list[dict]:
+        """Approved requests from one base mandate that minted a mandate and released no held call, newest first.
+
+        These are the run's earlier approvals, which a later request may reuse (add-run-reuse).
+        """
+        rows = self._exec(
+            "SELECT * FROM requests WHERE requester_jti = ? AND status = 'approved' AND held IS NULL "
+            "AND minted IS NOT NULL ORDER BY decided_at DESC, created DESC",
+            (requester_jti,),
+        ).fetchall()
+        return [self._row(r) for r in rows]
+
     def expire_due(self, now: int | None = None) -> list[dict]:
         """Mark pending requests past their expiry as expired; returns them so their events can be sent."""
         now = now or int(time.time())
