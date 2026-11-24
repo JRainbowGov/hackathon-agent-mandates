@@ -111,9 +111,37 @@ def test_grant_ignores_arguments():
     assert payload["level"] == 2
 
 
-def test_claimless_mandate_gets_server_level():
+def test_claimless_mandate_gets_the_claimless_level(monkeypatch):
+    # a mandate with no clearance keeps reaching pupil-data (question 0, the Day 2 default mandate), but its
+    # grant carries the claim-less level (add-graded-pupil-data), so the server strips what the gateway would
     entry = {"server": "pupil-data", "tools": ["search"], "constraints": {"urn": ["SCH01"]}}
-    assert grant_fields({"jti": "j"}, entry, "pupil-data")["level"] == 4
+    assert grant_fields({"jti": "j"}, entry, "pupil-data")["level"] == 2
+    monkeypatch.setenv("GATEWAY_CLAIMLESS_LEVEL", "3")
+    assert grant_fields({"jti": "j"}, entry, "pupil-data")["level"] == 3
+    monkeypatch.setenv("GATEWAY_CLAIMLESS_LEVEL", "9")  # a bad value never falls back to 4
+    assert grant_fields({"jti": "j"}, entry, "pupil-data")["level"] == 2
+    assert grant_fields({"jti": "j", "clearance": 4}, entry, "pupil-data")["level"] == 4
+
+
+def test_claimless_counts_are_not_stripped():
+    # safe counts release rounded aggregates and are never stripped (add-graded-pupil-data): stripping the per-pupil
+    # breakdown's group columns at the server would merge groups and corrupt the counts
+    entry = {"server": "pupil-data", "tools": ["aggregate"], "constraints": {"table": ["personal_data_school_census"]}}
+    assert grant_fields({"jti": "j"}, entry, "pupil-data", tool="aggregate")["level"] == 4
+    assert grant_fields({"jti": "j"}, entry, "pupil-data", tool="search")["level"] == 2
+
+
+def test_claimless_search_drops_special_category_columns(served):
+    base, priv = served
+    args = {"query": "P0004", "urn": "SCH01"}
+    entry = {"server": "pupil-data", "tools": ["search"], "constraints": {"urn": ["SCH01"]}}
+    fields = grant_fields({"jti": "j"}, entry, "pupil-data")
+    rows = _call(f"{base}/mcp/", "search", args, _mint(priv, tool="search", arguments=args, **fields))
+    assert rows
+    assert all(r["Psuedo ID"] == "P0004" for r in rows)
+    returned = {k for r in rows for k in r}
+    assert not {"Ethnicity", "InCareAtCurrentSchool", "FSMeligible", "Language"} & returned
+    assert "Gender" in returned  # basic data still comes through
 
 
 # ---------------------------------------------------------------- over real HTTP

@@ -14,6 +14,8 @@
     signed_in_as: string | null;
     can_decide: boolean;
     current?: string;
+    // earlier approvals for the same mandate that still work: shown so many small asks read as their total
+    already_approved?: { request_id: string; summary: string; expires_at: number }[];
     requested?: { scope: Entry[]; clearance: number | null; ttl: number };
     agent_id?: string;
     agent_reason?: string;
@@ -129,6 +131,18 @@
       <div class="govuk-summary-list__row">
         <dt class="govuk-summary-list__key">It can already</dt>
         <dd class="govuk-summary-list__value">{view.current}</dd>
+      </div>
+    {/if}
+    {#if view.already_approved?.length}
+      <div class="govuk-summary-list__row">
+        <dt class="govuk-summary-list__key">Also approved earlier, still active</dt>
+        <dd class="govuk-summary-list__value">
+          <ul class="govuk-list govuk-list--bullet">
+            {#each view.already_approved as earlier (earlier.request_id)}
+              <li>{earlier.summary} (until {expires(earlier.expires_at)})</li>
+            {/each}
+          </ul>
+        </dd>
       </div>
     {/if}
     <div class="govuk-summary-list__row">

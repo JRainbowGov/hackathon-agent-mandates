@@ -120,11 +120,44 @@ A `pupil-data.write` is held (`202 SENSITIVE_TOOL`). The agent asks with
 Community College (SCH04)". The approved mandate lets that exact call through once (`200 PREAPPROVED`) within 5
 minutes. Different arguments, or a second try, are held again.
 
+## From Claude Code: the MCP shim
+
+`gateway/shim.py` is a local MCP server that holds the agent key and the mandates, so the agent never handles
+either. It offers `call`, `my_grants`, `check_access`, `request_scopes` and `await_approval`. `call` uses the
+narrowest mandate that covers the call and falls back to the base mandate. A refusal says what to do next, and a
+held call comes back with the `held` object `request_scopes` needs. `held` may also be a list, released by one
+approval. Any mandate in a result, whether newly approved or an earlier approval reused within the run, goes into
+the shim's run wallet (`examples/mandate_wallet.py`) and is taken out of what the agent sees. Give it a mandate
+with `clearance` (`dunmore.jwt` above):
+
+```bash
+claude mcp add mandates -e SHIM_AGENT_KEY=$PWD/gateway/state/agent.pem -e SHIM_MANDATE=$PWD/dunmore.jwt \
+  -- uv --directory $PWD run python -m gateway.shim
+```
+
+Then ask Claude Code for Brookmere's Year 11 roster. It's refused, `check_access` names the missing grant, and
+`request_scopes` returns the text to show you. Approve it with `cli approve` or on the page, and `await_approval`
+picks up the new mandate. The retry goes through. `SHIM_GATEWAY_URL` points it at another gateway (default
+`http://localhost:8082`). The wallet is saved next to the base mandate (`dunmore.wallet.json`, or `SHIM_WALLET`), so
+a restarted shim keeps its approvals. A wallet file from a different base mandate is ignored.
+
 ## A supervising agent
 
 A mandate with `"can_delegate": true` can approve a helper's request with `grants.decide`, but only for grants its
 own scope and clearance cover. Anything wider is refused with `EXCEEDS_SUPERVISOR` and waits for the person. An
 agent can't approve its own request (`SELF_APPROVAL`).
+
+What a supervisor approves is tied to it. The minted mandate's `approved_by` carries the supervisor's status
+entry, and the gateway checks it on every call: revoke the supervisor and everything it approved stops with
+`APPROVER_REVOKED`. A minted mandate never outlives the supervisor that approved it, either.
+
+## Seeing approvals together
+
+Signed in, the approval page lists the earlier approvals for the same mandate that still work, under "Also
+approved earlier, still active". Ten narrow asks read as their total, not as ten small things. The words for a grant
+never say less than is enforced: an entry with no school constraint says "at every school", and row caps and call
+rates are shown. Once a person approves less than was asked, the agent's `grants.status` summary and the minted
+mandate's `purpose` describe what was approved.
 
 ## The gateway-to-tool hop
 
@@ -136,11 +169,15 @@ seconds and one use. A call straight to `:8080` gets `GRANT_MISSING`. A server r
 ## Audit
 
 Every `grants.*` call is a normal audited tool call. The issuer sends `approval_requested`, `approval_granted`,
-`approval_denied` and `approval_expired` events, signed with its key, into the same hash chain.
+`approval_denied` and `approval_expired` events, signed with its key, into the same hash chain. An
+`approval_granted` event names the mandate it minted (`minted_jti`).
 
 ## Still unresolved
 
 - Approvers are a key file per person, not SSO or a passkey.
 - The person's ceiling is a JSON file, not a real entitlement source.
-- The chain doesn't yet record which mandate an approval minted. The audit event has no field for it.
 - The issuer and `cli issue` both write `status_list.json`, with no lock between them.
+- A helper still needs an original mandate of its own before it can ask; a parent agent can't hand a narrowed
+  grant to a new key.
+- Only the principal can approve, with nobody to cover when they're away, and one approval is enough even for
+  special category data or a write.

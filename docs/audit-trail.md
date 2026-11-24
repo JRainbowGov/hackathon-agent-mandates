@@ -68,17 +68,19 @@ uv run python -m gateway.cli audit saw --mandate reader.jwt --agent-key reader.p
 ```json
 {
   "pupil_ids": ["P0004", "P0022"],
-  "columns": ["AcademicYear", "AgeAtStartOfAcademicYear", "CensusTerm", "EnrolStatus", "Ethnicity", "FSMeligible",
-              "Gender", "InCareAtCurrentSchool", "Language", "Psuedo ID", "URN"],
-  "max_pii_level": 4,
+  "columns": ["AcademicYear", "AgeAtStartOfAcademicYear", "CensusTerm", "EnrolStatus", "Gender", "Psuedo ID", "URN"],
+  "max_pii_level": 2,
   "schools": ["SCH01"],
   "calls": {"allowed": 3, "held": 0, "refused": 1},
   "revoked": true,
-  "summary": "Before it was revoked, this access returned records including special category data such as ethnicity or care status for 2 pupils at 1 school."
+  "summary": "Before it was revoked, this access returned basic personal data such as names for 2 pupils at 1 school."
 }
 ```
 
-The manifest read added no columns and no pupils: a JSON document isn't a table, so it counts as level 1.
+The manifest read added no columns and no pupils: a JSON document isn't a table, so it counts as level 1. The job
+mandate has no `clearance`, so its census rows are stripped to the claim-less level (2 by default, see
+`add-graded-pupil-data`) and came back without `Ethnicity`, `InCareAtCurrentSchool`, `FSMeligible` or `Language`.
+With a higher `clearance` those columns would be in the list.
 
 ## Who used it (question 16)
 

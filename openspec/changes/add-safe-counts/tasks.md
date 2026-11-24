@@ -21,4 +21,4 @@
 
 - [x] 5.1 `make eval_run` gives 32/32 and question 0 at 12/12
 - [x] 5.2 `make test` and `make lint` pass
-- [ ] 5.3 Live: the two Codex leak calls from the proposal are refused through the gateway on `:8082`, _(done on this branch's gateway on :18088 beside the shared stack, not on the rebuilt :8082 container)_ and a `clearance: 4` in-care-by-school call returns Greystone with `count: null`
+- [x] 5.3 Live: the two Codex leak calls from the proposal are refused through the gateway on `:8082`, _(24 Nov, on the rebuilt `:8082` container: both leak calls `403 COUNT_COLUMN_REFUSED Psuedo ID`, Ethnicity without clearance 4 refused, SCH07 in care `count: null`, SCH02 `count: 0`)_ and a `clearance: 4` in-care-by-school call returns Greystone with `count: null`

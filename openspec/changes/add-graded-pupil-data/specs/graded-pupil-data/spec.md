@@ -44,6 +44,11 @@ A `pupil-data` result for a mandate with no `clearance` claim SHALL be stripped 
 - **WHEN** a mandate with no `clearance` and scope allowing `search` at `SCH02` calls `pupil-data.search(query="P0050", urn="SCH02")`
 - **THEN** the gateway returns `200 ALLOW` with P0050's rows, none containing `Ethnicity`, `InCareAtCurrentSchool`, `FSMeligible` or `Language`, and the audit event's `max_pii_level` is 2
 
+#### Scenario: The server strips the same columns
+- **WHEN** the same claim-less `search` is forwarded to `pupil-data` over HTTP
+- **THEN** its tool grant carries the claim-less level, so the MCP server drops the same columns before the gateway sees the result
+- **AND** a claim-less `aggregate` grant keeps the server's level, so the per-pupil breakdown behind safe counts keeps its group columns
+
 #### Scenario: Claim-less free school meal counts
 - **WHEN** the eval's counts mandate (no `clearance`) asks for free school meal numbers by school
 - **THEN** the counts are released as before

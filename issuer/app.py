@@ -175,7 +175,7 @@ def agent_view(r: dict) -> dict:
         "status": r["status"],
         "user_code": r["user_code"],
         "approval_url": f"{FRONTEND_URL}/approve/{r['id']}",
-        "summary": r["requested"]["summary"],
+        "summary": summary_of(r),
         "approvers": [r["principal"], "a supervising agent with can_delegate"],
         "expires_at": r["expires"],
     }
@@ -333,9 +333,20 @@ def _with_parent_rate(entry: dict, parent_scope: list[dict]) -> dict:
     return entry
 
 
-def mint_for(r: dict, approved: dict, approved_by: dict) -> tuple[str, str]:
+def summary_of(r: dict) -> str:
+    """The request in words: what was approved once it is, what was asked for until then."""
+    approved = r.get("approved")
+    if r["status"] != "approved" or not approved or r["held"]:
+        return r["requested"]["summary"]
+    return grants_words(approved["scope"], clearance=approved.get("clearance"), ttl=approved.get("ttl"))
+
+
+def mint_for(r: dict, approved: dict, approved_by: dict, *, not_after: int | None = None) -> tuple[str, str]:
+    """`not_after`: a supervising agent's expiry; what it approves can't outlive it."""
     now = int(time.time())
     ttl = min(approved["ttl"], r["parent_exp"] - now)
+    if not_after is not None:
+        ttl = min(ttl, not_after - now)
     if r["held"]:
         ttl = min(ttl, HELD_TTL)
     if ttl <= 0:
@@ -362,7 +373,7 @@ def mint_for(r: dict, approved: dict, approved_by: dict) -> tuple[str, str]:
         scope=scope,
         deny=r["deny"],
         ttl=ttl,
-        purpose=r["requested"]["summary"][:500],
+        purpose=summary_of(r)[:500],  # r is already decided, so these are the approved grant's words
         principal=r["principal"],
         org=r["org"] or "",
         extra=extra,
@@ -381,7 +392,9 @@ def _check_mintable(r: dict, approved: dict) -> None:
         raise Refused("EXCEEDS_PRINCIPAL", over)
 
 
-def _approve_or_reject(r: dict, decision: str, approved_by: dict, narrowed: dict | None) -> dict:
+def _approve_or_reject(
+    r: dict, decision: str, approved_by: dict, narrowed: dict | None, *, not_after: int | None = None
+) -> dict:
     if decision not in ("approve", "reject"):
         raise Refused("DECISION_INVALID", "decision must be approve or reject")
     if decision == "reject":
@@ -399,7 +412,7 @@ def _approve_or_reject(r: dict, decision: str, approved_by: dict, narrowed: dict
         r = store().decide(r["id"], "approved", approved_by, approved)
     except AlreadyDecided as e:
         raise Refused("ALREADY_DECIDED", r["id"]) from e
-    token, jti = mint_for(r, approved, approved_by)
+    token, jti = mint_for(r, approved, approved_by, not_after=not_after)
     store().set_minted(r["id"], jti, token)
     r = store().get(r["id"])
     store().enqueue({"event_type": "approval_granted", "request": r, "reason_code": "APPROVED",
@@ -442,8 +455,10 @@ def supervisor_decision(rid: str, body: SupervisorBody):
         and clearance_covers(claims.get("clearance"), approved["clearance"], approved["scope"])
     ):
         refuse("EXCEEDS_SUPERVISOR", "the supervisor's own mandate doesn't cover this", next_action="ask_user")
-    who = {"kind": "agent", "id": claims.get("agent_id"), "mandate_jti": claims["jti"]}
-    return _approve_or_reject(r, args.get("decision"), who, args.get("approved"))
+    # the minted mandate carries the supervisor's status, so the gateway can withdraw it with the supervisor
+    who = {"kind": "agent", "id": claims.get("agent_id"), "mandate_jti": claims["jti"],
+           "status": claims["status"]["status_list"]}  # fmt: skip
+    return _approve_or_reject(r, args.get("decision"), who, args.get("approved"), not_after=claims["exp"])
 
 
 # ---------------------------------------------------------------- the person: login, view, decision
@@ -481,6 +496,25 @@ def approver_login(body: LoginBody):
     return store().new_session(principal)
 
 
+def still_granted(r: dict) -> list[dict]:
+    """Earlier approvals for the same mandate whose minted mandates still work (not expired, not revoked, parent
+    and approver alive), so many narrow approvals can be seen together instead of each looking small. Held-call
+    releases are left out (store.approved_for): they release exact calls once and grant no standing access."""
+    registry = TrustedList(_json_file("trusted_list.json"))
+    meta = _json_file("status_list.json")
+    status_lists = {meta["uri"]: (STATE_DIR / "status_list.jwt").read_text().strip()}
+    live = []
+    for earlier in store().approved_for(r["requester_jti"]):
+        if earlier["id"] == r["id"]:
+            continue
+        try:
+            claims = verify_mandate(earlier["minted"], registry, status_lists)
+        except Reject:
+            continue
+        live.append({"request_id": earlier["id"], "summary": summary_of(earlier), "expires_at": claims["exp"]})
+    return live
+
+
 @app.get("/requests/{rid}/view")
 def request_view(rid: str, x_approver_session: str | None = Header(default=None)):
     """What the approval page shows. Argument values and the agent's reason only with an approver session."""
@@ -504,6 +538,7 @@ def request_view(rid: str, x_approver_session: str | None = Header(default=None)
         view.update(
             summary=r["requested"]["summary"],
             current=grants_words(r["requested"]["parent_scope"], clearance=r["parent_clearance"]),
+            already_approved=still_granted(r),
             requested=r["requested"],
             agent_id=r["requester_agent_id"],
             agent_reason=r["reason"],  # the agent's own words: shown as plain text, never trusted

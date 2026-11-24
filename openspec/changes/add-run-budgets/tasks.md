@@ -22,4 +22,4 @@
 
 - [x] 4.1 `make eval_run` gives 32/32, question 0 at 12/12, run twice in a row against the same gateway
 - [x] 4.2 `make test` and `make lint` pass
-- [ ] 4.3 _(the scenarios ran on this branch's gateway via uvicorn beside the shared stack, not a rebuilt container)_ `docker compose up -d --build gateway` on a fresh audit volume, then the Day 2 feature-mandate dry run: a one-at-a-time walk stops at the budget, and a forged flood gets `RATE_LIMITED` without crashing the gateway
+- [x] 4.3 _(24 Nov, on the rebuilt `:8082` container, on the existing audit volume with fresh mandates rather than a wiped volume, so the shared log was kept: the walk gave 3 ALLOW, `429 BUDGET_EXHAUSTED distinct_pupils 3` with no result, then the first pupil free; 200 forged requests gave 120 `MANDATE_MALFORMED` then 80 `RATE_LIMITED`, healthcheck 200 throughout, valid calls allowed again afterwards)_ `docker compose up -d --build gateway` on a fresh audit volume, then the Day 2 feature-mandate dry run: a one-at-a-time walk stops at the budget, and a forged flood gets `RATE_LIMITED` without crashing the gateway
