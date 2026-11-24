@@ -120,6 +120,23 @@ A `pupil-data.write` is held (`202 SENSITIVE_TOOL`). The agent asks with
 Community College (SCH04)". The approved mandate lets that exact call through once (`200 PREAPPROVED`) within 5
 minutes. Different arguments, or a second try, are held again.
 
+## From Claude Code: the MCP shim
+
+`gateway/shim.py` is a local MCP server that holds the agent key and the mandates, so the agent never handles
+either. It offers `call`, `my_grants`, `check_access`, `request_scopes` and `await_approval`. `call` tries the base
+mandate first, then any approved mandate still in date. A refusal says what to do next, and a held call comes back
+with the `held` object `request_scopes` needs. Give it a mandate with `clearance` (`dunmore.jwt` above):
+
+```bash
+claude mcp add mandates -e SHIM_AGENT_KEY=$PWD/gateway/state/agent.pem -e SHIM_MANDATE=$PWD/dunmore.jwt \
+  -- uv --directory $PWD run python -m gateway.shim
+```
+
+Then ask Claude Code for Brookmere's Year 11 roster. It's refused, `check_access` names the missing grant, and
+`request_scopes` returns the text to show you. Approve it with `cli approve` or on the page, and `await_approval`
+picks up the new mandate. The retry goes through. `SHIM_GATEWAY_URL` points it at another gateway (default
+`http://localhost:8082`). Approved mandates live in the shim's memory, so restarting it drops them.
+
 ## A supervising agent
 
 A mandate with `"can_delegate": true` can approve a helper's request with `grants.decide`, but only for grants its
