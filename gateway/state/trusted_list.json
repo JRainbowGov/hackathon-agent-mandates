@@ -1,0 +1,11 @@
+{
+  "issuers": {
+    "https://issuer.hack.local": {
+      "issuer-2026-11": {
+        "kty": "OKP",
+        "crv": "Ed25519",
+        "x": "_M8PnzNgOGsRX0cNdtBLlxoA3RyPYKU8fSmK0klWugE"
+      }
+    }
+  }
+}

@@ -1,0 +1,2 @@
+{"officer:jsmith": {"servers": {"directory": ["roster", "name"], "pupil-data": ["search", "pupil", "write"]},
+ "urns": ["SCH01", "SCH02", "SCH03", "SCH04"], "max_clearance": 4}}
