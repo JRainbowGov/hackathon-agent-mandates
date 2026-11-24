@@ -294,7 +294,8 @@ async def _allowed(limits: budgets.State, decision, ctx, plan, body: CallBody, *
             status, data, error = await _forward(body, ctx, decision_id, safe_counts.k_for(ctx.claims))
             # graded pupil-data: never more than the clearance, even if the server sent it (add-graded-pupil-data)
             if status == HTTPStatus.OK and not counts and (level := graded.level_for(body.server, ctx.claims)):
-                data = graded.strip(data, level)
+                query = body.arguments.get("query") if body.tool == "search" else None
+                data = graded.strip(data, level, query=query)
         min_level = safe_counts.max_level(body.arguments) if counts else None
         summary = audit.summarise(data, body.server, min_level=min_level) if status == HTTPStatus.OK else None
         if summary is not None and (over := await _pupil_budget(limits, plan, summary)):

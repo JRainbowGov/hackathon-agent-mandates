@@ -34,10 +34,13 @@ def test_clearance_3_adds_level_3(stack):
 
 def test_search_rows_are_stripped_too(stack):
     client, mandate, call, _ = stack
-    status, resp = call(client, mandate(SCH02, clearance=1), "pupil-data", "search", query="P0050", urn="SCH02")
+    status, resp = call(client, mandate(SCH02, clearance=1), "pupil-data", "search", query="SPR", urn="SCH02")
     assert status == 200
     assert resp["result"]
     assert not any(set(row) & (LEVEL_3 | LEVEL_4) for row in resp["result"])
+    # the pupil ID is level 2: at clearance 1 a search can't confirm it through the rows it picks
+    status, resp = call(client, mandate(SCH02, clearance=1), "pupil-data", "search", query="P0050", urn="SCH02")
+    assert (status, resp["result"]) == (200, [])
 
 
 def test_claimless_person_tool_is_refused(stack):
@@ -124,3 +127,23 @@ def test_strip_leaves_documents_alone():
     manifest = {"classification": {"columns": {"t": {"Ethnicity": 4}}}}
     assert graded.strip(manifest, 2) == manifest
     assert graded.strip([{"Psuedo ID": "P1", "Ethnicity": "WHIT"}], 2) == [{"Psuedo ID": "P1"}]
+
+
+@pytest.mark.parametrize("query", ["ASIA", "2_OTH", "WHIT"])  # ethnicity, language, ethnicity
+@pytest.mark.parametrize("clearance", [None, 2])
+def test_search_cant_select_pupils_by_a_stripped_value(stack, query, clearance):
+    """Searching for a hidden value used to return exactly the pupils who have it (11 of 11 for ASIA)."""
+    client, mandate, call, _ = stack
+    m = mandate(SCH02) if clearance is None else mandate(SCH02, clearance=clearance)
+    status, resp = call(client, m, "pupil-data", "search", query=query, urn="SCH02", limit=100)
+    assert status == 200
+    assert resp["result"] == []  # the only match was in a column this mandate may not see
+
+
+def test_search_on_visible_columns_still_works(stack):
+    client, mandate, call, _ = stack
+    status, resp = call(client, mandate(SCH02, clearance=3), "pupil-data", "search", query="2_OTH", urn="SCH02",
+                        limit=5)  # fmt: skip
+    assert status == 200
+    assert resp["result"]  # Language is level 3, visible at clearance 3
+    assert all(row["Language"] == "2_OTH" for row in resp["result"])

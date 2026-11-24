@@ -47,3 +47,19 @@ A `pupil-data` result for a mandate with no `clearance` claim SHALL be stripped 
 #### Scenario: Claim-less free school meal counts
 - **WHEN** the eval's counts mandate (no `clearance`) asks for free school meal numbers by school
 - **THEN** the counts are released as before
+
+### Requirement: A search can't select pupils by a stripped value
+When a `pupil-data.search` result is stripped to a level below 4, a row SHALL be returned only if the search query matches, case-insensitively, one of the columns left after stripping. The gateway SHALL apply this before release, and the MCP server SHALL apply it again under the tool grant's level, so neither relies on the other. Otherwise the rows chosen by matching the whole row would reveal the stripped value.
+
+#### Scenario: Searching for an ethnicity without the clearance for it
+- **WHEN** a mandate with no clearance, or with clearance 2, calls `pupil-data.search(query="ASIA", urn="SCH02", limit=100)`
+- **THEN** the gateway returns `200` with no rows, where before it returned exactly the 11 pupils of that ethnicity with the `Ethnicity` column removed
+
+#### Scenario: Searching a column the mandate may see
+- **WHEN** a mandate with clearance 3 searches `query="2_OTH"` at `SCH02`
+- **THEN** the result has rows, each with `Language` `2_OTH`
+
+#### Scenario: Question 0's searches are unaffected
+- **WHEN** `make eval_run` runs
+- **THEN** every search case (pupil IDs, terms, year codes) matches a visible column and the eval stays 32/32
+

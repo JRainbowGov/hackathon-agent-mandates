@@ -66,10 +66,22 @@ def _strip_row(row: dict, level: int) -> dict:
     return {k: v for k, v in row.items() if column_level(k) <= level}
 
 
-def strip(data: Any, level: int) -> Any:
-    """Rows (flat dicts) lose every column above `level`; documents (nested JSON) are left as they are."""
+def strip(data: Any, level: int, query: str | None = None) -> Any:
+    """Rows (flat dicts) lose every column above `level`; documents (nested JSON) are left as they are.
+
+    With a search `query`, a row is kept only if the query matches a column left after stripping. The server
+    matches the whole row, so otherwise the choice of rows would reveal what was stripped: a search for "ASIA"
+    with no clearance returned exactly the pupils of that ethnicity.
+    """
     if isinstance(data, list):
-        return [_strip_row(r, level) if _is_row(r) else r for r in data]
+        rows = [_strip_row(r, level) if _is_row(r) else r for r in data]
+        if isinstance(query, str):
+            rows = [r for r in rows if not _is_row(r) or _matches_visible(r, query)]
+        return rows
     if _is_row(data):
         return _strip_row(data, level)
     return data
+
+
+def _matches_visible(row: dict, query: str) -> bool:
+    return query.lower() in ",".join(str(v) for v in row.values()).lower()

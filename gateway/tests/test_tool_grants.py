@@ -343,3 +343,16 @@ def test_http_call_that_reaches_a_tool_without_a_grant_is_refused():
             routes_mcp.search(query="P0011", urn="SCH04")
     finally:
         tg.over_http.reset(marker)
+
+
+@pytest.mark.parametrize(("level", "expected_rows"), [(2, False), (4, True)])
+def test_server_search_cant_select_by_a_column_above_the_grant(served, level, expected_rows):
+    """At the data server too: a search hit must match a column the grant lets through, or the rows it picks
+    reveal the stripped value (searching "ASIA" at level 2 returned exactly the pupils of that ethnicity)."""
+    base, priv = served
+    args = {"query": "ASIA", "urn": "SCH01", "limit": 100}
+    grant = _mint(priv, arguments=args, level=level)
+    rows = _call(f"{base}/mcp/", "search", args, grant)
+    assert bool(rows) is expected_rows
+    if rows:
+        assert all(r["Ethnicity"] == "ASIA" for r in rows)

@@ -272,16 +272,27 @@ def _project(row: dict, grant: Grant, level_of) -> dict:
     return {k: v for k, v in row.items() if level_of(k) <= grant.level}
 
 
+def matches_visible(row: dict, query: str) -> bool:
+    """A search hit only if the query is in a column the caller may see. The server matched the whole row, so
+    without this the choice of rows would reveal a stripped value (search "ASIA" returns exactly those pupils)."""
+    return query.lower() in ",".join(str(v) for v in row.values()).lower()
+
+
 def enforce(data: Any, grant: Grant | None, arguments: dict, level_of) -> Any:
     """Apply a grant to a tool's output: rows outside its schools or pupils dropped, columns above its level
-    dropped, at most max_rows rows. `level_of(column)` gives a column's data level. No grant (in process): as is.
+    dropped, a search's rows kept only if its query matches a column left, at most max_rows rows.
+    `level_of(column)` gives a column's data level. No grant (in process): as is.
     """
     if grant is None:
         return data
     urn_arg = arguments.get("urn")
+    query = arguments.get("query")
     if isinstance(data, list):
         rows = [r for r in data if not isinstance(r, dict) or _row_allowed(r, grant, urn_arg)]
-        return [_project(r, grant, level_of) if isinstance(r, dict) else r for r in rows][: grant.max_rows]
+        rows = [_project(r, grant, level_of) if isinstance(r, dict) else r for r in rows]
+        if isinstance(query, str):
+            rows = [r for r in rows if not isinstance(r, dict) or matches_visible(r, query)]
+        return rows[: grant.max_rows]
     if isinstance(data, dict) and data and ("Psuedo ID" in data or "URN" in data):
         if not _row_allowed(data, grant, urn_arg):
             return {}
