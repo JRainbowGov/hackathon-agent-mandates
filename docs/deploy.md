@@ -63,5 +63,6 @@ the `.jwt` files. Never post or copy `*.pem` beyond the list above.
 - **No grace on `exp`.** A mandate is refused from the second it expires. The 30 seconds of clock skew stay on `nbf`
   only, where they forgive a freshly issued mandate. An expired mandate accepted for 30 seconds would have scored as a
   "Dead mandate".
-- **`/demo` is off unless `GATEWAY_ENABLE_DEMO=1`.** It answers `404`. Locally, set the variable in `.env` to use the
-  walkthrough; it also needs the issuer key on the gateway, so it only works with the full state.
+- **`/demo` is off unless `GATEWAY_ENABLE_DEMO=1`.** It answers `404`. The walkthrough at `:8081/demo` no longer works
+  even with the variable set: it mints and revokes with the issuer key, which stays with the issuer service. Use the
+  CLI (`cli issue`, `cli call`, `cli revoke`) instead.
