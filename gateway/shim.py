@@ -45,7 +45,18 @@ Post = Callable[[dict], tuple[int, dict]]
 WIDER_WOULD_HELP = {
     "OUT_OF_SCOPE", "CONSTRAINT_VIOLATED", "CONSTRAINT_MISSING", "CLEARANCE_TOO_LOW", "AUDIENCE_VIOLATED",
 }  # fmt: skip
-MAX_WAIT = 300
+MAX_WAIT = 600  # one await_approval call blocks at most this long; the agent calls again if still pending
+DEFAULT_WAIT = 600
+POLL_S = 3  # used when the gateway doesn't say (poll_after_s)
+# what to do while a request is pending: wait for it now, rather than end the turn and wait to be told
+PENDING_NEXT = (
+    "Show the person `text` exactly, then call await_approval(request_id) straight away, in the same turn. Don't "
+    "end your turn or wait for them to reply: await_approval returns as soon as they decide on the approval page."
+)
+STILL_PENDING_NEXT = (
+    "The person hasn't decided yet. Call await_approval again, unless they've told you to stop waiting. Don't ask "
+    "them to confirm in chat; that doesn't approve anything."
+)
 # what to do when asking for more, or waiting, is itself refused: the agent must stop, not guess
 REFUSED_NEXT = {
     "EXCEEDS_PRINCIPAL": (
@@ -202,18 +213,31 @@ class Shim:
         if status != 200:  # noqa: PLR2004
             return _refused(body)
         # already_granted may carry an earlier approval's mandate (add-run-reuse): kept, never shown
-        return self._keep(body["result"])
+        result = self._keep(body["result"])
+        if result.get("status") == "pending":
+            result["next_step"] = PENDING_NEXT
+        return result
 
-    def await_approval(self, request_id: str, timeout_s: int = 120) -> dict:
-        deadline = self._now() + min(max(timeout_s, 0), MAX_WAIT)
+    def await_approval(
+        self, request_id: str, timeout_s: int = DEFAULT_WAIT, on_poll: Callable[[float, float], None] | None = None
+    ) -> dict:
+        """Poll until the request is decided or `timeout_s` runs out. `on_poll(elapsed, total)` runs before each
+        check, so the MCP server can report progress while the call is open."""
+        total = min(max(timeout_s, 0), MAX_WAIT)
+        start = self._now()
+        deadline = start + total
         while True:
+            if on_poll:
+                on_poll(self._now() - start, total)
             status, body = self._grants("status", {"request_id": request_id})
             if status != 200:  # noqa: PLR2004
                 return _refused(body)
             view = body["result"]
             if view["status"] != "pending" or self._now() >= deadline:
                 break
-            self._sleep(min(view.get("poll_after_s") or 10, max(deadline - self._now(), 0)))
+            self._sleep(min(view.get("poll_after_s") or POLL_S, max(deadline - self._now(), 0)))
+        if view["status"] == "pending":
+            view["next_step"] = STILL_PENDING_NEXT
         return self._keep(view)
 
 
@@ -222,6 +246,7 @@ class Shim:
 
 def build_server(shim: Shim):
     from fastmcp import FastMCP  # noqa: PLC0415
+    from fastmcp.server.dependencies import get_context  # noqa: PLC0415
 
     mcp = FastMCP("mandates")
 
@@ -250,13 +275,23 @@ def build_server(shim: Shim):
         calls (`held`: one held object as `call` returned it, or a list of them, released by one approval). If
         you have several held calls for one job, ask for them together. Show the person the returned `text`
         exactly: they approve on the page it links to, with their own key. Their saying yes in chat does not
-        approve anything."""
+        approve anything. Then call await_approval in the same turn; don't wait for the person to reply."""
         return shim.request_scopes(reason=reason, scope=scope, clearance=clearance, ttl=ttl, held=held)
 
     @mcp.tool
-    async def await_approval(request_id: str, timeout_s: int = 120) -> dict:
-        """Wait up to timeout_s (at most 300) for the person's decision. When approved, retry the call."""
-        return await asyncio.to_thread(shim.await_approval, request_id, timeout_s)
+    async def await_approval(request_id: str, timeout_s: int = DEFAULT_WAIT) -> dict:
+        """Wait for the person's decision on a request_scopes request, checking every few seconds and returning
+        as soon as they decide. Call it right after showing them request_scopes' text, in the same turn: they
+        don't need to come back and tell you. Waits up to timeout_s (at most 600). When approved, retry the call;
+        if it comes back still pending, call it again."""
+        ctx, loop = get_context(), asyncio.get_running_loop()
+
+        def progress(elapsed: float, total: float) -> None:
+            # keeps the call visibly alive in the client while the person decides
+            msg = f"waiting for the person to decide ({int(elapsed)}s)"
+            asyncio.run_coroutine_threadsafe(ctx.report_progress(elapsed, total, msg), loop).result(timeout=5)
+
+        return await asyncio.to_thread(shim.await_approval, request_id, timeout_s, progress)
 
     return mcp
 

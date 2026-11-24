@@ -40,6 +40,7 @@ GRANTS_TOOLS = {
 REQUEST_ID = re.compile(r"^sr_[A-Za-z0-9_-]{6,40}$")
 MAX_HELD = 50  # held calls one request may release together, as on the issuer
 ISSUER_URL = os.environ.get("ISSUER_URL", "http://issuer:8083").rstrip("/")
+POLL_AFTER_S = 3  # how often an agent should check a pending request (the shim waits on it)
 NEXT_ACTION = {
     "pending": "ask_user",
     "approved": "retry",
@@ -182,7 +183,7 @@ def _with_next(view: dict) -> dict:
     view["next_action"] = NEXT_ACTION.get(status, "wait")
     if view.get("reason_code") == "NUMBER_MISMATCH":  # a wrong pick on the page, not a person saying no
         view["next_action"] = "request_again"
-    view["poll_after_s"] = 10 if status == "pending" else None
+    view["poll_after_s"] = POLL_AFTER_S if status == "pending" else None
     if status == "pending":
         view["text"] = (
             f"Approval needed: {view['summary']}\n"
