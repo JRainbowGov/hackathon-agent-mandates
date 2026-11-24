@@ -60,7 +60,7 @@ The gateway SHALL refuse with `429 RATE_LIMITED` any call from an agent key that
 - **THEN** after 120 refusals the rest get `429 RATE_LIMITED` without verification, and the audit trail grows by at most one event per second for that address
 
 ### Requirement: Mandates without budget claims get alerts, not refusals
-For a mandate with no `budget` claim and no `rate` on any entry, the history of the run SHALL NOT change any decision. The gateway SHALL instead record an `alert` event in the audit chain, naming the mandate `jti` and a reason, when: the mandate has been refused 5 times in a row (`ALERT_REFUSALS`); its family has received more than 200 distinct pupils (`ALERT_MANY_PUPILS`); or one pupil has been returned to 3 or more different mandates within an hour (`ALERT_PUPIL_TARGETED`, naming the pupil ID). Each alert SHALL be recorded once per mandate and reason, or for `ALERT_PUPIL_TARGETED` once per pupil per hour.
+For a mandate with no `budget` claim and no `rate` on any entry, the history of the run SHALL NOT change any decision. The gateway SHALL instead record an `alert` event in the audit chain, naming the mandate `jti` and a reason, when: the mandate has been refused 5 times in a row (`ALERT_REFUSALS`); its family has received more than 200 distinct pupils (`ALERT_MANY_PUPILS`); one pupil has been returned to 3 or more different mandates within an hour (`ALERT_PUPIL_TARGETED`, naming the pupil ID); or its family has made 5 or more allowed `aggregate` calls with a `where` filter within an hour (`ALERT_COUNTS_NARROWING`), since counts carry no pupil IDs for the other alerts to see. Each alert SHALL be recorded once per mandate and reason, for `ALERT_PUPIL_TARGETED` once per pupil per hour, and for `ALERT_COUNTS_NARROWING` once per family per hour.
 
 #### Scenario: The eval raises no refusals
 - **WHEN** `make eval_run` sends 6 refusals in a row on one claim-less mandate and then allowed calls on it
@@ -69,6 +69,10 @@ For a mandate with no `budget` claim and no `rate` on any entry, the history of 
 #### Scenario: A pupil being targeted
 - **WHEN** three different mandates each receive pupil `P0011` within an hour
 - **THEN** one `ALERT_PUPIL_TARGETED` alert naming `P0011` is recorded, and the next call returning `P0011` is still allowed
+
+#### Scenario: Repeated filtered counts
+- **WHEN** a mandate with no budget claim makes 6 allowed `aggregate` calls, each filtered with `where`, within an hour
+- **THEN** one `ALERT_COUNTS_NARROWING` alert is recorded, and every call is still allowed
 
 #### Scenario: The person sees the alert
 - **WHEN** an alert is recorded for a mandate delegated by `officer:jsmith`

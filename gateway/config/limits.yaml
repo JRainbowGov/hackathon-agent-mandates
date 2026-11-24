@@ -28,3 +28,6 @@ alerts:
   # a pupil returned to this many different mandates within the window is flagged as targeted
   pupil_targeted_mandates: 3
   pupil_targeted_window_minutes: 60
+  # this many allowed counts with a `where` filter by one mandate family within that window is flagged as narrowing
+  # (repeated filtered counts are how a differencing attack works; their answers carry no pupil IDs)
+  filtered_counts: 5

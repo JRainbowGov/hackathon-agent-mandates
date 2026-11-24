@@ -99,7 +99,7 @@ The agent never holds an approver key. URL and number are only identifiers: the 
 - *Alternative:* HTML served by the issuer. Rejected now that the UI can change: two web surfaces to secure instead of one.
 
 ### 6. The principal ceiling
-`issuer/state/principals.json` maps principal → {servers, tools, urns, max clearance}. It is checked at request time, so the agent sees `EXCEEDS_PRINCIPAL` immediately, and again at mint time, in case the file changed. A principal with no entry has no ceiling to grant from, and every request is refused. This is the hackathon stand-in for a real entitlement source (question 13).
+`gateway/state/principals.json` (the issuer's `ISSUER_STATE_DIR`) maps principal → {servers, tools, urns, max clearance}. It is checked at request time, so the agent sees `EXCEEDS_PRINCIPAL` immediately, and again at mint time, in case the file changed. A principal with no entry has no ceiling to grant from, and every request is refused. This is the hackathon stand-in for a real entitlement source (question 13).
 
 ### 7. The supplementary mandate shape
 ```json
@@ -117,7 +117,7 @@ The agent never holds an approver key. URL and number are only identifiers: the 
 }
 ```
 - `verify_mandate` gains one step after the revocation check: if `parent` is present, check its bit on its status list, giving `PARENT_REVOKED` or `STATUS_UNAVAILABLE`. One level only (non-goal: deeper chains).
-- The agent keeps both mandates and chooses per call. The MCP shim tries the base mandate first, and any unexpired supplementary one on refusal.
+- The agent keeps both mandates and chooses per call. The MCP shim tries the narrowest unexpired supplementary mandate that covers the call first, and falls back to the base mandate (which any new request must name).
 - *Alternative:* re-issue the parent, wider. Rejected: it widens standing access, and the old mandate must be revoked in step.
 
 ### 8. Action hash for held calls

@@ -302,7 +302,7 @@ class Run:
         self.report = Report()
         self.keys: dict[int, object] = {}
         self.approvers: dict[str, object] = {}
-        self.pending: list[tuple[str, str, str]] = []  # (request_id, user_code, principal) to reject at the end
+        self.pending: list[tuple[str, int, str]] = []  # (request_id, number, principal) to reject at the end
         self._finder = None
         self._audit = None
         self.current: int | None = None  # the question being run
@@ -418,14 +418,14 @@ class Run:
         view = resp.result if isinstance(resp.result, dict) else {}
         if view.get("status") == "pending":
             person = claims_of(mandate)["delegator"]["principal"]
-            self.pending.append((view["request_id"], view["user_code"], person))
+            self.pending.append((view["request_id"], view["number"], person))
         return resp
 
     def decide(
-        self, rid: str, user_code: str, person: str, *, decision="approve", approver=None, signed=True, approved=None
+        self, rid: str, number: int, person: str, *, decision="approve", approver=None, signed=True, approved=None
     ) -> tuple[int, dict]:
         """What `cli approve` does: a decision signed with the approver key, posted to the issuer."""
-        body = {"decision": decision, "user_code": user_code, "approved": approved, "signed": None}
+        body = {"decision": decision, "number": number, "approved": approved, "signed": None}
         if signed:
             priv = approver or self.approvers[person]
             body["signed"] = cli.decision_token(priv, person, rid, decision, approved)
@@ -453,7 +453,7 @@ class Run:
         view = r.result or {}
         if not ok or view.get("status") != "pending":
             return None, view
-        code, answer = self.decide(view["request_id"], view["user_code"], EVAL_PERSON)
+        code, answer = self.decide(view["request_id"], view["number"], EVAL_PERSON)
         self.report.add(
             question,
             f"{server}.{tool}: approved with the approver key",
@@ -998,14 +998,14 @@ class Run:
         view = r.result or {}
         if not self.check(9, "grants.request for the held write: pending", r, status=200) or "request_id" not in view:
             return
-        rid, code = view["request_id"], view["user_code"]
+        rid, code = view["request_id"], view["number"]
         s1, a1 = self.decide(rid, code, EVAL_PERSON, signed=False)
         stranger = generate_keypair()[0]
         s2, a2 = self.decide(rid, code, EVAL_PERSON, approver=stranger)
         st = self.status(k, m, rid)
         self.report.add(
             9,
-            "approving with the URL and code only: refused (APPROVER_REQUIRED)",
+            "approving with the URL and number only: refused (APPROVER_REQUIRED)",
             [] if s1 == 401 and a1.get("error") == "APPROVER_REQUIRED" else [f"{s1} {a1}"],
         )
         self.report.add(
@@ -1084,7 +1084,7 @@ class Run:
             w
             for w in (
                 view.get("approval_url") or "approval_url",
-                view.get("user_code") or "user_code",
+                f"choose {view.get('number')}",
                 'Replying "yes" here does not approve it',
             )
             if w not in text

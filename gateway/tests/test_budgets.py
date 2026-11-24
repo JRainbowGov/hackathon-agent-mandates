@@ -300,3 +300,26 @@ def test_an_audit_file_from_before_alerts_is_migrated_and_still_verifies(tmp_pat
         sqlite3.connect(path).execute("DELETE FROM audit_events")
     audit._store = None  # noqa: SLF001
     json.dumps(chain)  # events stay plain data
+
+
+def test_repeated_filtered_counts_raise_a_narrowing_alert_once(gw):  # noqa: F811
+    from gateway.tests.test_safe_counts import CENSUS, counts_caller  # noqa: PLC0415
+
+    client, _, state = gw
+    call = counts_caller(state, claims={"clearance": 4})
+    years = ["2020/21", "2021/22", "2022/23", "2023/24", "2020/21", "2021/22"]
+    for year in years:
+        r = call(client, table=CENSUS, group_by=["URN"], measure="InCareAtCurrentSchool",
+                 where={"URN": "SCH07", "AcademicYear": year})  # fmt: skip
+        assert r.status_code == 200  # alerts never refuse
+    unfiltered = call(client, table=CENSUS, group_by=["URN"], measure="InCareAtCurrentSchool")
+    assert unfiltered.status_code == 200
+    alerts = [e["reason_code"] for e in all_events() if e["event_type"] == "alert"]
+    assert alerts == ["ALERT_COUNTS_NARROWING"]
+
+
+def test_filtered_counts_window_forgets_old_calls():
+    st = budgets.State(budgets.Limits(pupil_targeted_window_minutes=1))
+    assert budgets.filtered_counts_in_window(st, "f", add=True, now=0.0) == 1
+    assert budgets.filtered_counts_in_window(st, "f", add=True, now=30.0) == 2
+    assert budgets.filtered_counts_in_window(st, "f", add=False, now=61.0) == 1

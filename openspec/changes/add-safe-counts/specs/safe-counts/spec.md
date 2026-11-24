@@ -26,6 +26,17 @@ A level-4 column (by the data manifest's classification, currently `Ethnicity` a
 - **WHEN** a mandate with `clearance: 4` makes the same call
 - **THEN** the call is allowed, subject to suppression
 
+### Requirement: Counts without a clearance group no higher than search returns
+For a mandate with no `clearance` claim, a `group_by` column above the claim-less level of graded pupil-data (2 by default) SHALL be refused with `403 COUNT_COLUMN_REFUSED`. The `measure` MAY be level 3, so school-level free school meal numbers stay available.
+
+#### Scenario: Language without a clearance
+- **WHEN** a mandate with no `clearance` calls `aggregate` with `group_by=["Language"]`
+- **THEN** the gateway refuses with `403 COUNT_COLUMN_REFUSED` naming `Language`
+
+#### Scenario: Language at clearance 3
+- **WHEN** a mandate with `clearance: 3` makes the same call
+- **THEN** the call is allowed
+
 ### Requirement: Counts are no finer than two columns
 A call with more than 2 `group_by` columns, or a `where` filter on any column that isn't level 1 or 2, SHALL be refused with `403 COUNT_TOO_FINE`.
 
@@ -34,7 +45,7 @@ A call with more than 2 `group_by` columns, or a `where` filter on any column th
 - **THEN** the gateway returns `403 DENY` with reason `COUNT_TOO_FINE`
 
 ### Requirement: Groups are counted on pupils and small ones are suppressed
-For an allowed `aggregate` call, the gateway SHALL report `total` and `count` as numbers of distinct pupils, not census rows. It SHALL remove from the result every group with fewer than `k` distinct pupils, where `k` is 10, or the mandate's `counts.k` claim if that is a higher integer. In a released group, it SHALL replace `count` with `null` when either the count or `total − count` is between 1 and 4. When groups are removed, the result SHALL end with one row `{"suppressed_groups": N}` and SHALL NOT include any removed group's keys.
+For an allowed `aggregate` call, the gateway SHALL report `total` and `count` as numbers of distinct pupils, not census rows. It SHALL remove from the result every group with fewer than `k` distinct pupils, where `k` is 10, or the mandate's `counts.k` claim if that is a higher integer. In a released group, it SHALL replace `count` with `null` when either the count or `total − count` is between 0 and 4. When groups are removed, the result SHALL end with one row `{"suppressed_groups": N}` and SHALL NOT include any removed group's keys.
 
 #### Scenario: Free school meals by school is released
 - **WHEN** the eval's counts mandate calls `aggregate(table="personal_data_school_census", group_by=["URN"], measure="FSMeligible")`
@@ -43,6 +54,10 @@ For an allowed `aggregate` call, the gateway SHALL report `total` and `count` as
 #### Scenario: One in-care pupil at a school
 - **WHEN** a mandate with `clearance: 4` asks for `InCareAtCurrentSchool` grouped by `URN`, and Greystone (`SCH07`) has exactly one pupil in care
 - **THEN** Greystone's row has `count: null`, so the one child isn't counted
+
+#### Scenario: Zero looks the same as a small count
+- **WHEN** the same mandate asks for `InCareAtCurrentSchool` grouped by `URN`, filtered to Greystone with each of `Gender`, `AcademicYear` and `EnrolStatus` in turn
+- **THEN** every Greystone row has `count: null`, including the filters that leave out its one pupil in care, so the filters can't narrow down who it is
 
 #### Scenario: A mandate can raise k but not lower it
 - **WHEN** a mandate with `counts: {"k": 3}` asks for a grouping with a 5-pupil group

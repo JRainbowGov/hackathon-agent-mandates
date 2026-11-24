@@ -139,7 +139,7 @@ def test_one_in_care_pupil_is_not_counted(gw):  # noqa: F811
     assert r.status_code == 200, r.text
     by_school = {row["URN"]: row for row in r.json()["result"]}
     assert by_school["SCH07"] == {"URN": "SCH07", "total": 110, "count": None}  # 112 pupils, exactly 1 in care
-    assert by_school["SCH02"]["count"] == 0  # none in care: zero is safe to say
+    assert by_school["SCH02"]["count"] is None  # none in care: hidden too, or 0 against null would name the child
 
 
 def test_differencing_gives_multiples_of_five(gw):  # noqa: F811
@@ -159,3 +159,36 @@ def test_tables_without_pupils_are_rounded_rows(gw):  # noqa: F811
     r = call(client, table="schools", group_by=["SchoolLA"], measure="URN")
     assert r.status_code == 200, r.text
     assert r.json()["result"] == [{"SchoolLA": "SYN", "total": 10, "count": 0}]  # 12 schools, rounded
+
+
+def test_zero_and_everyone_are_hidden_like_small_counts():
+    none = [{"URN": "A", "Psuedo ID": f"P{i:04d}", "total": 1, "count": 0} for i in range(20)]
+    every = [{"URN": "B", "Psuedo ID": f"P{i:04d}", "total": 1, "count": 1} for i in range(100, 120)]
+    out = safe_counts.release(none + every, ["URN"], 10, per_pupil=True)
+    assert out == [{"URN": "A", "total": 20, "count": None}, {"URN": "B", "total": 20, "count": None}]
+
+
+def test_filtered_counts_cant_tell_who_is_in_care(gw):  # noqa: F811
+    """The live attack: SCH07's one pupil in care, narrowed by overlapping filters. Every answer must look the same."""
+    client, _, state = gw
+    call = counts_caller(state, claims={"clearance": 4})
+    answers = set()
+    for where in ({"Gender": "F"}, {"Gender": "M"}, {"AcademicYear": "2020/21"}, {"AcademicYear": "2021/22"},
+                  {"AcademicYear": "2022/23"}, {"AcademicYear": "2023/24"}, {"EnrolStatus": "C"}):  # fmt: skip
+        r = call(
+            client, table=CENSUS, group_by=["URN"], measure="InCareAtCurrentSchool", where={"URN": "SCH07", **where}
+        )
+        assert r.status_code == 200, r.text
+        answers.update(row.get("count") for row in r.json()["result"] if row.get("URN") == "SCH07")
+    assert answers <= {None}
+
+
+def test_claimless_counts_cant_group_by_level_3(gw):  # noqa: F811
+    client, _, state = gw
+    call = counts_caller(state)
+    r = call(client, table=CENSUS, group_by=["Language"], measure="FSMeligible", where={"URN": "SCH04"})
+    assert (r.status_code, r.json()["decision"]["reason_code"]) == (403, "COUNT_COLUMN_REFUSED")
+    # the measure may still be level 3: the organisers' school-level free school meal numbers
+    assert call(client, table=CENSUS, group_by=["URN"], measure="FSMeligible").status_code == 200
+    at3 = counts_caller(state, claims={"clearance": 3})
+    assert at3(client, table=CENSUS, group_by=["Language"], measure="FSMeligible").status_code == 200

@@ -19,8 +19,11 @@ looks pupils up one at a time ends up with the cohort. The gateway now judges th
   which `audit.events` shows:
   - `ALERT_REFUSALS`: 5 refusals in a row;
   - `ALERT_MANY_PUPILS`: more than 200 pupils received;
-  - `ALERT_PUPIL_TARGETED`: one pupil returned to 3 or more mandates within an hour. Every Day 2 attacker going for
-    P0011 trips it.
+  - `ALERT_PUPIL_TARGETED`: one pupil returned to 3 or more mandates within an hour. A Day 2 attacker reading P0011's
+    rows through 3 or more mandates trips it.
+  - `ALERT_COUNTS_NARROWING`: 5 or more allowed counts with a `where` filter by one mandate family within an hour.
+    Counts carry no pupil IDs, so a differencing attack on `aggregate` never reaches the pupil budget or
+    `ALERT_PUPIL_TARGETED`; this is the signal it leaves instead.
 
 ## Configuration
 
@@ -37,7 +40,8 @@ looks pupils up one at a time ends up with the cohort. The gateway now judges th
 | `alerts.refusals_in_a_row` | 5 | `ALERT_REFUSALS` threshold |
 | `alerts.many_pupils` | 200 | `ALERT_MANY_PUPILS` threshold |
 | `alerts.pupil_targeted_mandates` | 3 | Mandates returning one pupil before `ALERT_PUPIL_TARGETED` |
-| `alerts.pupil_targeted_window_minutes` | 60 | Window for that count |
+| `alerts.pupil_targeted_window_minutes` | 60 | Window for that count, and for `alerts.filtered_counts` |
+| `alerts.filtered_counts` | 5 | Filtered `aggregate` calls before `ALERT_COUNTS_NARROWING` |
 
 - **Overrides:** any value can be set with `GATEWAY_LIMIT_<SECTION>_<KEY>`, for example
   `GATEWAY_LIMIT_CEILINGS_PER_KEY_PER_MINUTE=600`.
@@ -80,6 +84,8 @@ P0007  200 ALLOW IN_SCOPE                              (already received: free)
 
 ## Still unresolved
 
+- **Counts don't spend the pupil budget.** A count names no pupils, so `budget.distinct_pupils` can't see one; limit
+  counting with a `calls` budget or a scope entry `rate`. The narrowing alert's window is in memory too.
 - **Per-minute windows are in memory.** A restart loosens them for a minute. Lifetime budgets come from the audit
   store and survive.
 - **Alerts are signals, not controls.** A careful agent stays under the thresholds; mandates that need a hard limit

@@ -110,7 +110,8 @@ uv run python -m gateway.cli audit saw --mandate reader.jwt --agent-key reader.p
 # 403 DENY CONSTRAINT_VIOLATED
 ```
 
-The job's own mandate asking for its own log gets `403 DENY CLEARANCE_MISSING`.
+The job's own mandate asking for its own log gets `403 DENY CLEARANCE_MISSING`. A mandate that has a clearance but no
+`audit` entry in its scope gets `403 DENY OUT_OF_SCOPE`.
 
 ## Checking nobody rewrote it
 

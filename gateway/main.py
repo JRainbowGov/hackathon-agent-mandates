@@ -313,7 +313,8 @@ async def _allowed(limits: budgets.State, decision, ctx, plan, body: CallBody, *
                 return JSONResponse({"decision": withheld}, status_code=503)
         if status == HTTPStatus.OK:
             budgets.after_allowed(limits, plan)
-    await _alerts(limits, plan, ctx.claims, summary.pupil_ids if summary else [])
+    filtered = counts and status == HTTPStatus.OK and bool(body.arguments.get("where"))
+    await _alerts(limits, plan, ctx.claims, summary.pupil_ids if summary else [], filtered_count=filtered)
     return _response(record, status, data, error, limits.limits)
 
 
@@ -342,10 +343,10 @@ async def _record_or_log(record, ctx, body: CallBody, *, source, status, plan=No
         log.exception("audit event not written for refusal %s", record["decision_id"])
 
 
-async def _alerts(limits: budgets.State, plan, claims: dict, pupils: list[str]) -> None:
+async def _alerts(limits: budgets.State, plan, claims: dict, pupils: list[str], *, filtered_count=False) -> None:
     """Alerts never change a response, and a failure to raise one is only logged."""
     try:
-        await budgets.raise_alerts(limits, plan, claims, pupils)
+        await budgets.raise_alerts(limits, plan, claims, pupils, filtered_count=filtered_count)
     except Exception:
         log.exception("alert not recorded")
 

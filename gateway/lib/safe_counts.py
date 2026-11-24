@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from .audit import DEFAULT_MANIFEST, column_level
+from .graded import claimless_level
 
 SERVER, TOOL = "pupil-data", "aggregate"
 PUPIL_COLUMN = "Psuedo ID"
@@ -26,7 +27,7 @@ IDENTIFIER_COLUMNS = frozenset({PUPIL_COLUMN, "DisplayName"})
 MAX_GROUP_COLUMNS = 2
 MAX_WHERE_LEVEL = 2
 DEFAULT_K = 10
-SMALL_CELL = 4  # counts (and complements) from 1 to this are hidden
+SMALL_CELL = 4  # counts (and complements) from 0 to this are hidden
 ROUND_TO = 5
 
 
@@ -60,6 +61,13 @@ def check(arguments: dict, claims: dict | None) -> tuple[str, str] | None:
         for column in named:
             if column_level(column) > clearance:
                 return "COUNT_COLUMN_REFUSED", f"{column} is above clearance {clearance}"
+    elif not cleared_4:
+        # no clearance claim: search strips such a mandate to the claim-less level, so counts can't be grouped above
+        # it either. The measure may still be level 3 (school-level free school meal numbers: the organisers' eval)
+        level = claimless_level()
+        for column in group_by:
+            if column_level(column) > level:
+                return "COUNT_COLUMN_REFUSED", f"{column} is above the claim-less level {level}"
     if len(group_by) > MAX_GROUP_COLUMNS:
         return "COUNT_TOO_FINE", f"at most {MAX_GROUP_COLUMNS} group_by columns"
     for column in where:
@@ -96,7 +104,9 @@ def round5(n: int) -> int:
 
 
 def _hidden(m: int, n: int) -> bool:
-    return 1 <= m <= SMALL_CELL or 1 <= n - m <= SMALL_CELL
+    # zero is hidden too: if 0 were exact and 1-4 null, each filtered count would say whether a lone pupil is inside
+    # the filter, and a few overlapping filters narrow them down (a level-4 fact, e.g. who is in care)
+    return m <= SMALL_CELL or n - m <= SMALL_CELL
 
 
 def release(rows: list[dict], group_by: list[str], k: int, *, per_pupil: bool) -> list[dict]:

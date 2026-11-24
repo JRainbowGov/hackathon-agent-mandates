@@ -45,6 +45,7 @@ class Limits:
     many_pupils: int = 200
     pupil_targeted_mandates: int = 3
     pupil_targeted_window_minutes: int = 60
+    filtered_counts: int = 5
 
     def public(self) -> dict:
         """What /describe shows: every limit, nothing secret in it."""
@@ -54,7 +55,10 @@ class Limits:
 SECTIONS = {
     "ceilings": ("per_key_per_minute", "unverified_per_source_per_minute", "record_per_second", "retry_after_seconds"),
     "budgets": ("default_distinct_pupils", "default_calls"),
-    "alerts": ("refusals_in_a_row", "many_pupils", "pupil_targeted_mandates", "pupil_targeted_window_minutes"),
+    "alerts": (
+        "refusals_in_a_row", "many_pupils", "pupil_targeted_mandates", "pupil_targeted_window_minutes",
+        "filtered_counts",
+    ),  # fmt: skip
 }
 NULLABLE = {"default_distinct_pupils", "default_calls"}
 
@@ -209,6 +213,9 @@ class State:
         self.unverified = Windows()  # per source address: failed verifications
         self.per_key = Windows()  # per agent_id: verified calls
         self.per_entry = Windows()  # per (family, entry): allowed calls
+        # per family: allowed counts with a `where` filter, kept for the targeted window (a counts attack's signal:
+        # its answers carry no pupil IDs, so the pupil budget and ALERT_PUPIL_TARGETED never see it)
+        self.filtered_counts: dict[str, deque] = defaultdict(deque)
         self.last_recorded: dict[str, float] = {}
         self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
@@ -321,8 +328,23 @@ def after_allowed(st: State, plan: Plan) -> None:
         st.per_entry.add(plan.entry_key())
 
 
-async def raise_alerts(st: State, plan: Plan, claims: dict, pupils: list[str]) -> list[str]:
-    """Alerts for mandates without budget or rate claims. Never changes a decision; returns the reasons raised."""
+def filtered_counts_in_window(st: State, family: str, *, add: bool, now: float | None = None) -> int:
+    """Allowed `aggregate` calls with a `where` filter by this family in the targeted window, after adding one."""
+    now = time.monotonic() if now is None else now
+    q = st.filtered_counts[family]
+    if add:
+        q.append(now)
+    while q and q[0] <= now - st.limits.pupil_targeted_window_minutes * 60:
+        q.popleft()
+    return len(q)
+
+
+async def raise_alerts(
+    st: State, plan: Plan, claims: dict, pupils: list[str], *, filtered_count: bool = False
+) -> list[str]:
+    """Alerts for mandates without budget or rate claims. Never changes a decision; returns the reasons raised.
+
+    filtered_count: this call was an allowed `aggregate` with a `where` filter."""
     from datetime import UTC, datetime, timedelta  # noqa: PLC0415
 
     from . import audit  # noqa: PLC0415
@@ -340,6 +362,9 @@ async def raise_alerts(st: State, plan: Plan, claims: dict, pupils: list[str]) -
         for pupil in pupils:
             if len(await audit.mandates_for_pupil_since(pupil, since)) >= lim.pupil_targeted_mandates:
                 raised.append(("ALERT_PUPIL_TARGETED", alert_id(pupil, "targeted", bucket), pupil))
+    if lim.filtered_counts and filtered_count:
+        if filtered_counts_in_window(st, plan.family, add=True) >= lim.filtered_counts:
+            raised.append(("ALERT_COUNTS_NARROWING", alert_id(plan.family, "counts_narrowing", hour_bucket()), None))
     for reason, event_id, pupil in raised:
         await audit.record_alert(jti=jti, principal=principal, reason_code=reason, event_id=event_id,
                                  pupil_id=pupil, agent_id=plan.agent_id)  # fmt: skip
