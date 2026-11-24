@@ -95,6 +95,8 @@ def ensure_keypair(priv_path: Path, pub_path: Path) -> Ed25519PrivateKey:
                 serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()
             )
         )
+    if pub_path.is_dir():
+        pub_path.rmdir()  # Docker makes an empty directory when it mounts a file that isn't there yet
     if not pub_path.exists():
         pub_path.write_bytes(
             priv.public_key().public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)
