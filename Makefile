@@ -45,6 +45,9 @@ eval_build:  ## Mint the eval mandates + keys from gateway/state into eval_pack/
 eval_run:  ## Fire the eval cases for questions 0 to 5 at GATEWAY_URL (default localhost:8082)
 	uv run python -m gateway.eval run --pack eval_pack --url $${GATEWAY_URL:-http://localhost:8082}
 
+eval_questions:  ## Per-question eval (0 to 16) of decisions and results at GATEWAY_URL; mints from GATEWAY_STATE_DIR. EVAL_ARGS=--flood adds the ceiling case
+	uv run python -m gateway.eval_questions --url $${GATEWAY_URL:-http://localhost:8082} $(EVAL_ARGS)
+
 deploy_up:  ## Day 2: start the stack with only the gateway published (docs/deploy.md)
 	docker compose -f docker-compose.yaml -f docker-compose.deploy.yaml up -d --build --wait
 
