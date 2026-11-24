@@ -226,6 +226,10 @@
     </form>
   {:else if view.status !== 'pending'}
     <p class="govuk-body">This request is {view.status}. Nothing more to do here.</p>
+    {#if view.status === 'approved' || view.status === 'rejected'}
+      <p class="govuk-body">Your agent picks this up by itself within a few seconds. You don't need to go back and
+        tell it.</p>
+    {/if}
   {/if}
 {/if}
 

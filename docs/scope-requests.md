@@ -105,7 +105,8 @@ issuer starts: its pending requests end as expired, and new requests get numbers
 
 ## The new mandate, and a request it allows
 
-The agent polls:
+The agent waits for the decision by polling `grants.status` every `poll_after_s` (3 seconds), so the person doesn't
+have to go back and tell it:
 
 ```bash
 uv run python -m gateway.cli call --mandate dunmore.jwt --agent-key gateway/state/agent.pem --server grants \
@@ -151,8 +152,11 @@ claude mcp add mandates -e SHIM_AGENT_KEY=$PWD/gateway/state/agent.pem -e SHIM_M
 ```
 
 Then ask Claude Code for Brookmere's Year 11 roster. It's refused, `check_access` names the missing grant, and
-`request_scopes` returns the text to show you. Approve it with `cli approve` or on the page, and `await_approval`
-picks up the new mandate. The retry goes through. `SHIM_GATEWAY_URL` points it at another gateway (default
+`request_scopes` returns the text to show you, with a `next_step` telling the agent to call `await_approval` straight
+away, in the same turn. `await_approval` checks every 3 seconds for up to 10 minutes, sending MCP progress
+notifications while it waits, and comes back with a `next_step` to call it again if the person hasn't decided yet.
+Approve it with `cli approve` or on the page, and `await_approval` picks up the new mandate within a few seconds; you
+don't go back and tell the agent. The retry goes through. `SHIM_GATEWAY_URL` points it at another gateway (default
 `http://localhost:8082`). The wallet is saved next to the base mandate (`dunmore.wallet.json`, or `SHIM_WALLET`), so
 a restarted shim keeps its approvals. A wallet file from a different base mandate is ignored.
 

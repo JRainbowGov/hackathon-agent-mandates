@@ -93,9 +93,23 @@ def test_await_approval_gives_up_while_pending(flow):
     shim = shim_for(f, f["mandate"](roster("SCH04"), clearance=2),
                     sleep=lambda s: clock.__setitem__("t", clock["t"] + s), now=lambda: clock["t"])  # fmt: skip
     asked = shim.request_scopes(scope=roster("SCH02"), reason="letters")
-    waited = shim.await_approval(asked["request_id"], timeout_s=25)
+    polls = []
+    waited = shim.await_approval(asked["request_id"], timeout_s=25, on_poll=lambda e, t: polls.append((e, t)))
     assert (waited["status"], waited["next_action"]) == ("pending", "ask_user")
     assert clock["t"] >= 25
+    assert "await_approval again" in waited["next_step"]
+    # polled every 3 seconds, reporting progress against the deadline each time
+    assert [e for e, _ in polls][:3] == [0.0, 3.0, 6.0]
+    assert {t for _, t in polls} == {25}
+
+
+def test_pending_request_tells_the_agent_to_wait_in_the_same_turn(flow):
+    f = flow
+    shim = shim_for(f, f["mandate"](roster("SCH04"), clearance=2))
+    asked = shim.request_scopes(scope=roster("SCH02"), reason="letters")
+    assert asked["poll_after_s"] == 3
+    assert "await_approval" in asked["next_step"]
+    assert "same turn" in asked["next_step"]
 
 
 def test_rejected_request_says_stop(flow):
@@ -274,3 +288,28 @@ def test_an_unknown_refusal_still_has_a_next_step(flow):
     waited = shim.await_approval("urn:uuid:not-a-request", timeout_s=0)
     assert waited["status"] == "refused"
     assert waited["next_step"]
+
+
+def test_mcp_await_approval_reports_progress_until_decided(flow):
+    import asyncio  # noqa: PLC0415
+
+    from fastmcp import Client  # noqa: PLC0415
+
+    from gateway.shim import build_server  # noqa: PLC0415
+
+    f = flow
+    views = iter([{"status": "pending", "poll_after_s": 3}] * 2 + [{"status": "approved", "next_action": "retry"}])
+    shim = shim_for(f, f["mandate"](roster("SCH04"), clearance=2),
+                    post=lambda _body: (200, {"result": next(views)}), sleep=lambda _s: None)  # fmt: skip
+    progress = []
+
+    async def on_progress(_done, _total, message):
+        progress.append(message)
+
+    async def run():
+        async with Client(build_server(shim), progress_handler=on_progress) as client:
+            return (await client.call_tool("await_approval", {"request_id": "sr_x"})).data
+
+    assert asyncio.run(run())["status"] == "approved"
+    assert len(progress) == 3
+    assert all("waiting for the person" in m for m in progress)
