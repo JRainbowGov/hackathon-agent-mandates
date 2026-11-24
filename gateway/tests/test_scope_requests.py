@@ -629,3 +629,91 @@ def test_run_wallet_keeps_approvals_across_a_restart(flow, tmp_path):
     other_run = RunWallet.load(tmp_path / "run_wallet.json", f["mandate"](roster("SCH04"), clearance=2))
     assert other_run.valid() == []  # a new base mandate starts empty
     assert not other_run.add(minted)  # and won't take another run's mandate
+
+
+# ---------------------------------------------------------------- several held calls, one approval (add-batch-release)
+
+DRAFT_SCOPE = [{"server": "pupil-data", "tools": ["draft"], "constraints": {"urn": ["SCH04"]}}]
+
+
+def _pupils_at_sch04(n):
+    from gateway.tests.test_budgets import pupils_currently_at  # noqa: PLC0415
+
+    return pupils_currently_at("SCH04", n)
+
+
+def _held_draft(f, token, pupils):
+    args = {"urn": "SCH04", "pupil_ids": pupils, "kind": "absence"}
+    status, resp = f["call"](f["client"], token, "pupil-data", "draft", **args)
+    assert (status, resp["decision"]["reason_code"]) == (202, "SENSITIVE_TOOL")
+    return {"decision_id": resp["decision"]["decision_id"], "server": "pupil-data", "tool": "draft", "arguments": args}
+
+
+def test_several_held_calls_are_released_with_one_approval(flow):
+    f = flow
+    token = f["mandate"](DRAFT_SCOPE, deny=[], clearance=4)
+    pupils = _pupils_at_sch04(3)
+    held = [_held_draft(f, token, [p]) for p in pupils]  # the agent drafted one pupil at a time
+
+    v = f["request"](token, held=held)[1]["result"]
+    assert v["status"] == "pending"
+    assert _pending(f, token) == [_pending(f, token)[0]]  # one request, one prompt
+    view = f["ic"].get(f"/requests/{v['request_id']}/view", headers={"x-approver-session": f["login"]()}).json()
+    assert len(view["held_actions"]) == 3
+    assert view["held_action"] is None
+    assert all("Draft absence letters" in a for a in view["held_actions"])
+    f["decide"](v["request_id"], v["user_code"], session=f["login"]())
+    child = f["call"](f["client"], token, "grants", "status", request_id=v["request_id"])[1]["result"]["mandate"]
+    assert len(jwt.decode(child, options={"verify_signature": False})["preapproved"]) == 3
+
+    for h in held:  # each released call goes through once
+        status, resp = f["call"](f["client"], child, "pupil-data", "draft", **h["arguments"])
+        assert (status, resp["decision"]["reason_code"]) == (200, "PREAPPROVED")
+    status, resp = f["call"](f["client"], child, "pupil-data", "draft", **held[0]["arguments"])
+    assert (status, resp["decision"]["reason_code"]) == (202, "SENSITIVE_TOOL")  # not twice
+    other = {"urn": "SCH04", "pupil_ids": _pupils_at_sch04(4)[3:], "kind": "absence"}
+    assert f["call"](f["client"], child, "pupil-data", "draft", **other)[0] == 202  # nor one that wasn't approved
+
+
+def test_twenty_five_pupils_in_one_draft_are_one_approval(flow):
+    f = flow
+    token = f["mandate"](DRAFT_SCOPE, deny=[], clearance=4)
+    pupils = _pupils_at_sch04(25)
+    held = _held_draft(f, token, pupils)
+    v = f["request"](token, held=held)[1]["result"]
+    view = f["ic"].get(f"/requests/{v['request_id']}/view", headers={"x-approver-session": f["login"]()}).json()
+    assert all(p in view["held_action"] for p in pupils)  # the person sees every pupil before approving
+    f["decide"](v["request_id"], v["user_code"], session=f["login"]())
+    child = f["call"](f["client"], token, "grants", "status", request_id=v["request_id"])[1]["result"]["mandate"]
+    status, resp = f["call"](f["client"], child, "pupil-data", "draft", **held["arguments"])
+    assert (status, resp["decision"]["reason_code"]) == (200, "PREAPPROVED")
+    assert sorted(r["Psuedo ID"] for r in resp["result"]) == sorted(pupils)
+
+
+def test_a_batch_must_be_held_calls_of_this_mandate(flow):
+    f = flow
+    token = f["mandate"](DRAFT_SCOPE, deny=[], clearance=4)
+    one = _held_draft(f, token, _pupils_at_sch04(1))
+    for held, problem in (
+        ([one, one], "named twice"),
+        ([one, {**one, "decision_id": "not-a-held-call"}], "no held call"),
+        ([one] * 51, "1 to 50"),
+        ([], "1 to 50"),
+    ):
+        status, resp = f["request"](token, held=held)
+        assert (status, resp["decision"]["reason_code"]) == (403, "REQUEST_INVALID"), held
+        assert problem in resp["decision"]["detail"]
+
+
+def test_the_agent_is_told_to_batch(flow):
+    from mcp_server.api import routes_mcp  # noqa: PLC0415
+
+    f = flow
+    tools = {t["name"]: t for t in f["client"].get("/describe").json()["servers"]["pupil-data"]}
+    assert "Put every pupil in one call" in tools["draft"]["description"]
+    assert "list of up to 50" in grants.GRANTS_TOOLS["request"]
+    token = f["mandate"](DRAFT_SCOPE, deny=[], clearance=4)
+    held_call = {"server": "pupil-data", "tool": "draft", "arguments": {"urn": "SCH04", "pupil_ids": ["P0011"]}}
+    check = f["call"](f["client"], token, "grants", "check", args=held_call)[1]["result"]
+    assert "one list" in check["missing"]["held"]
+    assert routes_mcp  # the tool module is the one the gateway forwards to

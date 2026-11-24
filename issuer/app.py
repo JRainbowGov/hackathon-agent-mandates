@@ -53,7 +53,8 @@ STATE_DIR = Path(os.environ.get("ISSUER_STATE_DIR", "gateway/state"))
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:8081").rstrip("/")
 GATEWAY_INTERNAL_URL = os.environ.get("GATEWAY_INTERNAL_URL", "http://gateway:8082").rstrip("/")
 REQUEST_WINDOW = 300  # seconds a signed call stays fresh, as at the gateway
-HELD_TTL = 300  # a mandate that releases one held call lives at most 5 minutes
+HELD_TTL = 300  # a mandate that releases held calls lives at most 5 minutes
+MAX_HELD = 50  # held calls one request may release together (add-batch-release)
 REUSE_MIN_REMAINING_S = 60  # an earlier approval about to expire is not handed back; asking again is clearer
 LOGIN_MAX_AGE = 300
 LOGIN_TYP = "approver-login+jwt"
@@ -128,6 +129,41 @@ def _held_scope(held: dict) -> list[dict]:
     return [{"server": held["server"], "tools": [held["tool"]], "constraints": pinned}]
 
 
+def held_calls(held) -> list[dict]:
+    """The held calls a request releases, as a list: one object (the original shape) or a list of them."""
+    if held is None:
+        return []
+    return [held] if isinstance(held, dict) else list(held)
+
+
+def _held_list(held) -> list[dict]:
+    calls = held_calls(held)
+    if not calls or len(calls) > MAX_HELD or not all(isinstance(c, dict) for c in calls):
+        raise Refused("REQUEST_INVALID", f"held must be one held call or a list of 1 to {MAX_HELD}")
+    for c in calls:
+        if not {"decision_id", "server", "tool", "arguments"} <= set(c) or not isinstance(c["arguments"], dict):
+            raise Refused("REQUEST_INVALID", "each held call needs decision_id, server, tool and arguments")
+    if len({c["decision_id"] for c in calls}) != len(calls):
+        raise Refused("REQUEST_INVALID", "the same held call is named twice")
+    return calls
+
+
+def _held_union_scope(calls: list[dict]) -> list[dict]:
+    """One entry per distinct held call shape, so the minted mandate covers every released call and no more."""
+    seen, scope = set(), []
+    for c in calls:
+        for entry in _held_scope(c):
+            key = canonical(entry)
+            if key not in seen:
+                seen.add(key)
+                scope.append(entry)
+    return scope
+
+
+def held_words(calls: list[dict]) -> list[str]:
+    return [action_words(c["server"], c["tool"], c["arguments"]) for c in calls]
+
+
 def action_hash(server: str, tool: str, arguments: dict, mandate_hash: str) -> str:
     return sha256_hex(canonical({"server": server, "tool": tool, "arguments": arguments, "mandate_hash": mandate_hash}))
 
@@ -162,9 +198,9 @@ def create_request(body: CreateBody):
         # revocation of the original, which the parent check doesn't follow)
         raise Refused("REQUEST_INVALID", "ask with the original mandate, not a supplementary one")
     args = body.call["arguments"]
-    held = args.get("held")
+    held = _held_list(args["held"]) if args.get("held") is not None else None
     clearance, ttl, reason = args.get("clearance"), args.get("ttl", 3600), args.get("reason", "")
-    scope = _held_scope(held) if held else args.get("scope")
+    scope = _held_union_scope(held) if held else args.get("scope")
     try:
         validate_request(scope, clearance, HELD_TTL if held else ttl, reason)
     except Invalid as e:
@@ -186,14 +222,16 @@ def create_request(body: CreateBody):
     if counts["pending"] >= MAX_PENDING or counts["last_hour"] >= MAX_PER_HOUR:
         raise Refused("TOO_MANY_REQUESTS", f"{counts['pending']} pending, {counts['last_hour']} in the last hour")
 
-    summary = (
-        "Release one held call: " + action_words(held["server"], held["tool"], held["arguments"])
-        if held
-        else grants_words(scope, clearance=clearance, ttl=ttl)
-    )
-    public_summary = (
-        f"Release one held call to {held['server']}.{held['tool']}" if held else summary
-    )  # argument values only after sign-in
+    if held and len(held) == 1:
+        summary = "Release one held call: " + held_words(held)[0]
+        public_summary = f"Release one held call to {held[0]['server']}.{held[0]['tool']}"
+    elif held:
+        summary = f"Release {len(held)} held calls, each once: " + "; ".join(held_words(held))
+        tools = sorted({f"{c['server']}.{c['tool']}" for c in held})
+        public_summary = f"Release {len(held)} held calls to {', '.join(tools)}"
+    else:
+        summary = grants_words(scope, clearance=clearance, ttl=ttl)
+        public_summary = summary  # argument values only after sign-in
     r = store().create(
         requester_jti=claims["jti"],
         requester_agent_id=claims.get("agent_id"),
@@ -314,9 +352,10 @@ def mint_for(r: dict, approved: dict, approved_by: dict) -> tuple[str, str]:
     clearance = approved["clearance"] if approved["clearance"] is not None else r["parent_clearance"]
     if clearance is not None:
         extra["clearance"] = clearance
-    if r["held"]:
-        h = r["held"]
-        extra["preapproved"] = [action_hash(h["server"], h["tool"], h["arguments"], r["parent_mandate_hash"])]
+    if r["held"]:  # each released call once: one action hash per held call
+        extra["preapproved"] = [
+            action_hash(h["server"], h["tool"], h["arguments"], r["parent_mandate_hash"]) for h in held_calls(r["held"])
+        ]
     token, _idx = issue_mandate(
         STATE_DIR,
         jwk_to_pub(r["cnf_jwk"]),
@@ -468,9 +507,8 @@ def request_view(rid: str, x_approver_session: str | None = Header(default=None)
             requested=r["requested"],
             agent_id=r["requester_agent_id"],
             agent_reason=r["reason"],  # the agent's own words: shown as plain text, never trusted
-            held_action=action_words(r["held"]["server"], r["held"]["tool"], r["held"]["arguments"])
-            if r["held"]
-            else None,
+            held_action=held_words(held_calls(r["held"]))[0] if len(held_calls(r["held"])) == 1 else None,
+            held_actions=held_words(held_calls(r["held"])) if r["held"] else None,
         )
     return view
 

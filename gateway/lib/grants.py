@@ -2,7 +2,7 @@
 
     grants.self     the calling mandate's own grants, structured and in plain words
     grants.check    the decision a call would get, without forwarding it, plus the missing grant
-    grants.request  ask for more: a structured grant, or the release of one held call
+    grants.request  ask for more: a structured grant, or the release of held calls (one, or a list of them)
     grants.status   a request's state, and the new mandate once approved
     grants.decide   a supervising agent's decision on another agent's request
 
@@ -31,11 +31,13 @@ GRANTS_SERVER = "grants"
 GRANTS_TOOLS = {
     "self": "Your own grants: scope, deny rules, clearance, audience, expiry, parent, in plain words.",
     "check": "The decision a call would get (server, tool, arguments), without making it, and what's missing.",
-    "request": "Ask for more access (scope, clearance, ttl, reason) or the release of a held call (held).",
+    "request": "Ask for more access (scope, clearance, ttl, reason), or release held calls: held={decision_id, server, "
+    "tool, arguments}, or a list of up to 50 of them, approved together in one prompt.",
     "status": "A scope request's state (request_id); returns the new mandate once approved.",
     "decide": "A supervising agent's decision (request_id, decision, approved) on a helper's request.",
 }
 REQUEST_ID = re.compile(r"^sr_[A-Za-z0-9_-]{6,40}$")
+MAX_HELD = 50  # held calls one request may release together, as on the issuer
 ISSUER_URL = os.environ.get("ISSUER_URL", "http://issuer:8083").rstrip("/")
 NEXT_ACTION = {
     "pending": "ask_user",
@@ -127,7 +129,10 @@ def _missing_grant(server: str, tool: str, arguments: dict, code: str, scope: li
         entry["audience"] = {"pupils": [str(p) for p in named]}
     missing = {"scope": [entry], "clearance": SERVER_LEVELS.get(server)}
     if step:
-        missing["held"] = "this call is held for approval; ask with grants.request and held={decision_id, ...}"
+        missing["held"] = (
+            "this call is held for approval; ask with grants.request and held={decision_id, server, tool, arguments}. "
+            "Held several? Pass them as one list to ask once. For letters, put every pupil in one draft call."
+        )
     return missing
 
 
@@ -188,8 +193,12 @@ async def _request(claims: dict, body: dict, decision_id: str) -> Outcome:
         return refused("REQUEST_INVALID", "ask with the original mandate, not a supplementary one")
     held = args.get("held")
     if held is not None:
-        if not isinstance(held, dict) or (problem := await _held_matches(claims, held)):
-            return refused("REQUEST_INVALID", problem if held else "held must be an object")
+        calls = [held] if isinstance(held, dict) else held
+        if not isinstance(calls, list) or not calls or len(calls) > MAX_HELD:
+            return refused("REQUEST_INVALID", f"held must be one held call or a list of 1 to {MAX_HELD}")
+        for call in calls:
+            if not isinstance(call, dict) or (problem := await _held_matches(claims, call)):
+                return refused("REQUEST_INVALID", problem if isinstance(call, dict) else "each held call is an object")
     else:
         try:
             scope = args.get("scope")

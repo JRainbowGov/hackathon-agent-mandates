@@ -18,6 +18,7 @@
     agent_id?: string;
     agent_reason?: string;
     held_action?: string | null;
+    held_actions?: string[] | null;
   };
 
   let { requestId }: { requestId: string } = $props();
@@ -111,6 +112,17 @@
       <div class="govuk-summary-list__row">
         <dt class="govuk-summary-list__key">The held call</dt>
         <dd class="govuk-summary-list__value">{view.held_action}</dd>
+      </div>
+    {:else if view.held_actions && view.held_actions.length}
+      <div class="govuk-summary-list__row">
+        <dt class="govuk-summary-list__key">The {view.held_actions.length} held calls, each released once</dt>
+        <dd class="govuk-summary-list__value">
+          <ol class="govuk-list govuk-list--number">
+            {#each view.held_actions as action}
+              <li>{action}</li>
+            {/each}
+          </ol>
+        </dd>
       </div>
     {/if}
     {#if view.current}

@@ -171,6 +171,9 @@ def draft(urn: str, pupil_ids: list[str], kind: str = "absence") -> list[dict]:
     """
     Draft a letter home for each pupil currently at `urn`; pupils at other schools are skipped.
 
+    Put every pupil in one call: a draft is held for a person's approval, and one call with all the pupils is one
+    approval, where one call per pupil is one approval each.
+
     Args:
         urn: school URN the letters are from.
         pupil_ids: pseudo IDs to write to.
