@@ -29,7 +29,7 @@ def shim_for(f, mandate: str, post=None, wallet_path=None, **kw) -> Shim:
 
 
 def approve(f, view, approved=None):
-    r = f["decide"](view["request_id"], view["user_code"], session=f["login"](), approved=approved)
+    r = f["decide"](view["request_id"], view["number"], session=f["login"](), approved=approved)
     assert r.status_code == 200, r.text
 
 
@@ -48,7 +48,7 @@ def test_refused_roster_leads_to_a_request_an_approval_and_a_retry(flow):
 
     asked = shim.request_scopes(scope=missing, reason="absence letters for Brookmere", ttl=1800)
     assert asked["status"] == "pending"
-    assert asked["user_code"] in asked["text"]
+    assert f"choose {asked['number']}" in asked["text"]
     assert "does not approve" in asked["text"]
 
     approve(f, asked)
@@ -102,7 +102,7 @@ def test_rejected_request_says_stop(flow):
     f = flow
     shim = shim_for(f, f["mandate"](roster("SCH04"), clearance=2))
     asked = shim.request_scopes(scope=roster("SCH02"), reason="letters")
-    f["decide"](asked["request_id"], asked["user_code"], decision="reject", session=f["login"]())
+    f["decide"](asked["request_id"], asked["number"], decision="reject", session=f["login"]())
     done = shim.await_approval(asked["request_id"], timeout_s=5)
     assert (done["status"], done["next_action"]) == ("rejected", "stop")
     assert shim.my_grants()["supplementary"] == []

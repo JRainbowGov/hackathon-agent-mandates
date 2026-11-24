@@ -73,9 +73,9 @@ def flow(stack, monkeypatch):
     def login():
         return ic.post("/approver/login", json={"token": cli.login_token(approver, PRINCIPAL)}).json()["session"]
 
-    def decide(rid, code, decision="approve", session=None, approved=None):
+    def decide(rid, number, decision="approve", session=None, approved=None):
         headers = {"x-approver-session": session} if session else {}
-        body = {"decision": decision, "user_code": code, "approved": approved}
+        body = {"decision": decision, "number": number, "approved": approved}
         r = ic.post(f"/requests/{rid}/decision", json=body, headers=headers)
         deliver_queued()
         return r
@@ -186,12 +186,12 @@ def test_pending_request_tells_the_agent_what_to_do(flow):
     status, resp = f["request"](f["mandate"](roster("SCH04"), clearance=2), scope=roster("SCH02"), ttl=7200)
     r = resp["result"]
     assert (status, r["status"], r["next_action"]) == (200, "pending", "ask_user")
-    assert len(r["user_code"].replace("-", "")) >= 6
-    assert not set(r["user_code"]) & set("01IOLU")
+    assert isinstance(r["number"], int)
+    assert 10 <= r["number"] <= 99
     assert r["approval_url"].endswith(f"/approve/{r['request_id']}")
     assert "Brookmere High School (SCH02)" in r["summary"]
     assert "for 2 hours" in r["summary"]
-    assert r["user_code"] in r["text"]
+    assert f"choose {r['number']} on the approval page" in r["text"]
     assert 'Replying "yes" here does not approve it.' in r["text"]
 
 
@@ -202,7 +202,7 @@ def test_person_flow_end_to_end(flow):
     f = flow
     parent = f["mandate"](roster("SCH04"), clearance=2)
     rid_view = f["request"](parent, scope=roster("SCH02"))[1]["result"]
-    rid, code = rid_view["request_id"], rid_view["user_code"]
+    rid, code = rid_view["request_id"], rid_view["number"]
 
     # opening the URL is not approving
     r = f["decide"](rid, code)
@@ -259,7 +259,7 @@ def test_parent_revoked(flow):
     )  # fmt: skip
     parent.write_text(token)
     v = f["request"](token, scope=roster("SCH02"))[1]["result"]
-    f["decide"](v["request_id"], v["user_code"], session=f["login"]())
+    f["decide"](v["request_id"], v["number"], session=f["login"]())
     child = f["call"](f["client"], token, "grants", "status", request_id=v["request_id"])[1]["result"]["mandate"]
     assert f["call"](f["client"], child, "directory", "roster", **SCH02_Y11)[0] == 200
     cli.revoke_mandate(f["state"], idx)
@@ -277,14 +277,15 @@ def test_agent_reason_is_shown_literally(flow):
     # without a session only the public part shows
     public = f["ic"].get(f"/requests/{v['request_id']}/view").json()
     assert "agent_reason" not in public
-    assert public["user_code"] == v["user_code"]
+    assert "number" not in public
+    assert "number_options" not in public
 
 
 def test_cli_signed_decision(flow):
     f = flow
     v = f["request"](f["mandate"](roster("SCH04"), clearance=2), scope=roster("SCH02"))[1]["result"]
     signed = cli.decision_token(f["approver"], PRINCIPAL, v["request_id"], "reject")
-    body = {"decision": "reject", "user_code": v["user_code"], "approved": None, "signed": signed}
+    body = {"decision": "reject", "number": v["number"], "approved": None, "signed": signed}
     r = f["ic"].post(f"/requests/{v['request_id']}/decision", json=body)
     assert (r.status_code, r.json()["status"]) == (200, "rejected")
 
@@ -292,7 +293,7 @@ def test_cli_signed_decision(flow):
 def test_gateway_cannot_mint_on_its_own(flow):
     f = flow
     v = f["request"](f["mandate"](roster("SCH04"), clearance=2), scope=roster("SCH02"))[1]["result"]
-    r = f["ic"].post(f"/requests/{v['request_id']}/decision", json={"decision": "approve", "user_code": v["user_code"]})
+    r = f["ic"].post(f"/requests/{v['request_id']}/decision", json={"decision": "approve", "number": v["number"]})
     assert r.status_code == 401
     assert f["ic"].get(f"/requests/{v['request_id']}/view").json()["status"] == "pending"
 
@@ -305,6 +306,118 @@ def test_forged_requester(flow):
                             arguments={"scope": roster("SCH02"), "ttl": 600, "reason": "x"})  # fmt: skip
     r = f["ic"].post("/internal/requests", json={"call": body})
     assert (r.status_code, r.json()["error"]) == (403, "POP_FAILED")
+
+
+# ---------------------------------------------------------------- number matching
+
+
+def test_three_distinct_options_in_a_fixed_order(flow):
+    f = flow
+    v = f["request"](f["mandate"](roster("SCH04"), clearance=2), scope=roster("SCH02"))[1]["result"]
+    session = f["login"]()
+    view = f["ic"].get(f"/requests/{v['request_id']}/view", headers={"x-approver-session": session}).json()
+    options = view["number_options"]
+    assert len(options) == len(set(options)) == 3
+    assert all(isinstance(n, int) and 10 <= n <= 99 for n in options)
+    assert v["number"] in options
+    again = f["ic"].get(f"/requests/{v['request_id']}/view", headers={"x-approver-session": session}).json()
+    assert again["number_options"] == options  # reloading shows the same order
+
+
+def test_correct_number_is_not_always_first(flow):
+    f = flow
+    session = f["login"]()
+    positions = set()
+    for urn in ("SCH01", "SCH02", "SCH03") * 3:
+        token = f["mandate"](roster("SCH04"), clearance=2)
+        v = f["request"](token, scope=roster(urn))[1]["result"]
+        view = f["ic"].get(f"/requests/{v['request_id']}/view", headers={"x-approver-session": session}).json()
+        positions.add(view["number_options"].index(v["number"]))
+    assert len(positions) > 1  # 9 requests all in one position: about 1 in 6500
+
+
+def test_view_never_says_which_number_is_correct(flow):
+    f = flow
+    v = f["request"](f["mandate"](roster("SCH04"), clearance=2), scope=roster("SCH02"))[1]["result"]
+    public = f["ic"].get(f"/requests/{v['request_id']}/view").json()
+    signed_in = f["ic"].get(f"/requests/{v['request_id']}/view", headers={"x-approver-session": f["login"]()}).json()
+    for view in (public, signed_in):
+        assert not {"number", "match_number"} & set(view)
+        assert v["number"] not in [val for k, val in view.items() if k != "number_options"]
+    assert "number_options" not in public  # only the signed-in principal sees the options
+
+
+def test_wrong_number_ends_the_request(flow):
+    f = flow
+    token = f["mandate"](roster("SCH04"), clearance=2)
+    v = f["request"](token, scope=roster("SCH02"))[1]["result"]
+    session = f["login"]()
+    options = (
+        f["ic"]
+        .get(f"/requests/{v['request_id']}/view", headers={"x-approver-session": session})
+        .json()["number_options"]
+    )
+    wrong = next(n for n in options if n != v["number"])
+    r = f["decide"](v["request_id"], wrong, session=session)
+    assert (r.status_code, r.json()["error"]) == (403, "NUMBER_MISMATCH")
+    # one try, not three: the right number no longer works
+    r = f["decide"](v["request_id"], v["number"], session=session)
+    assert r.json()["error"] == "ALREADY_DECIDED"
+    result = f["call"](f["client"], token, "grants", "status", request_id=v["request_id"])[1]["result"]
+    assert (result["status"], result["reason_code"], result["next_action"]) == (
+        "rejected", "NUMBER_MISMATCH", "request_again",
+    )  # fmt: skip
+    denied = [e for e in events(jti_of(token)) if e["event_type"] == "approval_denied"]
+    assert [e["reason_code"] for e in denied] == ["NUMBER_MISMATCH"]
+    # a mismatch isn't a person saying no: the agent may ask again straight away
+    status, resp = f["request"](token, scope=roster("SCH02"))
+    assert (status, resp["result"]["status"]) == (200, "pending")
+
+
+def test_wrong_number_without_signing_in_changes_nothing(flow):
+    f = flow
+    v = f["request"](f["mandate"](roster("SCH04"), clearance=2), scope=roster("SCH02"))[1]["result"]
+    wrong = 10 if v["number"] != 10 else 11
+    r = f["decide"](v["request_id"], wrong)
+    assert (r.status_code, r.json()["error"]) == (401, "APPROVER_REQUIRED")
+    assert f["ic"].get(f"/requests/{v['request_id']}/view").json()["status"] == "pending"
+
+
+def test_store_from_before_number_matching_is_migrated(tmp_path):
+    import sqlite3  # noqa: PLC0415
+
+    from issuer.store import SCHEMA, Store  # noqa: PLC0415
+
+    path = tmp_path / "requests.db"
+    old = sqlite3.connect(path)
+    old_schema = SCHEMA.replace(
+        "match_number INTEGER NOT NULL,\n    match_options TEXT NOT NULL,", "user_code TEXT NOT NULL,"
+    )
+    old.executescript(old_schema.replace("    end_reason TEXT,\n", ""))
+    old.execute(
+        "INSERT INTO requests (id, requester_jti, principal, cnf_jwk, parent_mandate_hash, parent_status, parent_exp, "
+        "deny, requested, request_key, reason, user_code, created, expires, status) "
+        "VALUES ('sr_old', 'j', 'p', '{}', 'h', '{}', 0, '[]', '{}', 'k', '', 'ABCD-EFGH', 0, 99999999999, 'pending')"
+    )
+    old.commit()
+    old.close()
+
+    store = Store(path)
+    assert store.get("sr_old")["status"] == "expired"  # it can't be approved by number, so it ends
+    created = store.create(
+        requester_jti="j", principal="p", cnf_jwk={}, parent_mandate_hash="h", parent_status={}, parent_exp=0,
+        deny=[], requested={}, request_key="k2", reason="",
+    )  # fmt: skip
+    assert created["match_number"] in created["match_options"]
+
+
+def test_approving_needs_a_number(flow):
+    f = flow
+    v = f["request"](f["mandate"](roster("SCH04"), clearance=2), scope=roster("SCH02"))[1]["result"]
+    session = f["login"]()
+    r = f["decide"](v["request_id"], None, session=session)
+    assert (r.status_code, r.json()["error"]) == (400, "NUMBER_REQUIRED")
+    assert f["ic"].get(f"/requests/{v['request_id']}/view").json()["status"] == "pending"  # not a guess
 
 
 # ---------------------------------------------------------------- supervisors
@@ -378,7 +491,7 @@ def test_approval_page_shows_what_was_already_approved(flow):
     parent = f["mandate"](roster("SCH04"), clearance=2)
     session = f["login"]()
     first = f["request"](parent, scope=roster("SCH02"))[1]["result"]
-    f["decide"](first["request_id"], first["user_code"], session=session)
+    f["decide"](first["request_id"], first["number"], session=session)
     second = f["request"](parent, scope=roster("SCH03"))[1]["result"]
 
     view = f["ic"].get(f"/requests/{second['request_id']}/view", headers={"x-approver-session": session}).json()
@@ -400,7 +513,7 @@ def test_narrowed_approval_describes_what_was_approved(flow):
     parent = f["mandate"](roster("SCH04"), clearance=2)
     v = f["request"](parent, scope=roster("SCH02"), ttl=7200)[1]["result"]
     assert "for 2 hours" in v["summary"]
-    f["decide"](v["request_id"], v["user_code"], session=f["login"](),
+    f["decide"](v["request_id"], v["number"], session=f["login"](),
                 approved={"scope": roster("SCH02"), "clearance": 2, "ttl": 1800})  # fmt: skip
     result = f["call"](f["client"], parent, "grants", "status", request_id=v["request_id"])[1]["result"]
     assert "for 30 minutes" in result["summary"]
@@ -454,7 +567,7 @@ def test_asking_again_after_rejection(flow):
     f = flow
     token = f["mandate"](roster("SCH04"), clearance=2)
     v = f["request"](token, scope=roster("SCH02"))[1]["result"]
-    f["decide"](v["request_id"], v["user_code"], decision="reject", session=f["login"]())
+    f["decide"](v["request_id"], v["number"], decision="reject", session=f["login"]())
     status, resp = f["request"](token, scope=roster("SCH02"))
     assert (status, resp["decision"]["reason_code"]) == (403, "RECENTLY_REJECTED")
 
@@ -493,7 +606,7 @@ def test_correction_approved_and_applied_once(flow, tmp_path, monkeypatch):
     v = f["request"](token, held=held)[1]["result"]
     view = f["ic"].get(f"/requests/{v['request_id']}/view", headers={"x-approver-session": f["login"]()}).json()
     assert view["held_action"] == "Change FSMeligible to 1 for pupil P0011 at Dunmore Community College (SCH04)"
-    f["decide"](v["request_id"], v["user_code"], session=f["login"]())
+    f["decide"](v["request_id"], v["number"], session=f["login"]())
     child = f["call"](f["client"], token, "grants", "status", request_id=v["request_id"])[1]["result"]["mandate"]
     status, resp = f["call"](f["client"], child, "pupil-data", "write", **WRITE)
     assert (status, resp["decision"]["reason_code"]) == (200, "PREAPPROVED")
@@ -562,7 +675,7 @@ def test_supplementary_mandate_cannot_ask_for_more(flow):
     f = flow
     parent = f["mandate"](roster("SCH04"), clearance=2)
     v = f["request"](parent, scope=roster("SCH02"))[1]["result"]
-    f["decide"](v["request_id"], v["user_code"], session=f["login"]())
+    f["decide"](v["request_id"], v["number"], session=f["login"]())
     child = f["call"](f["client"], parent, "grants", "status", request_id=v["request_id"])[1]["result"]["mandate"]
     status, resp = f["request"](child, scope=roster("SCH03"))
     assert (status, resp["decision"]["reason_code"]) == (403, "REQUEST_INVALID")
@@ -573,7 +686,7 @@ def test_ceiling_rechecked_at_approval(flow):
     v = f["request"](f["mandate"](roster("SCH04"), clearance=2), scope=roster("SCH02"))[1]["result"]
     narrower = {PRINCIPAL: {**CEILING[PRINCIPAL], "urns": ["SCH04"]}}
     (f["state"] / "principals.json").write_text(json.dumps(narrower))  # the person lost Brookmere meanwhile
-    r = f["decide"](v["request_id"], v["user_code"], session=f["login"]())
+    r = f["decide"](v["request_id"], v["number"], session=f["login"]())
     assert (r.status_code, r.json()["error"]) == (403, "EXCEEDS_PRINCIPAL")
     assert f["ic"].get(f"/requests/{v['request_id']}/view").json()["status"] == "pending"
 
@@ -599,7 +712,7 @@ def test_minted_mandate_shares_the_parents_budget_and_rate(flow):
               "rate": {"per_minute": 5, "max_calls": 50}}]  # fmt: skip
     parent = f["mandate"](scope, clearance=2, budget={"distinct_pupils": 40})
     v = f["request"](parent, scope=roster("SCH02") + roster("SCH01"), clearance=2)[1]["result"]
-    f["decide"](v["request_id"], v["user_code"], session=f["login"]())
+    f["decide"](v["request_id"], v["number"], session=f["login"]())
     child = f["call"](f["client"], parent, "grants", "status", request_id=v["request_id"])[1]["result"]["mandate"]
     claims = jwt.decode(child, options={"verify_signature": False})
     assert claims["budget"] == {"distinct_pupils": 40}
@@ -615,7 +728,7 @@ def _approve(f, parent, scope, clearance=None):
     args = {"scope": scope} | ({"clearance": clearance} if clearance else {})
     v = f["request"](parent, **args)[1]["result"]
     assert v["status"] == "pending", v
-    f["decide"](v["request_id"], v["user_code"], session=f["login"]())
+    f["decide"](v["request_id"], v["number"], session=f["login"]())
     minted = f["call"](f["client"], parent, "grants", "status", request_id=v["request_id"])[1]["result"]["mandate"]
     return v["request_id"], minted
 
@@ -686,7 +799,7 @@ def test_a_released_held_call_is_not_reused(flow, tmp_path, monkeypatch):
     token, did = _held(f)
     held = {"decision_id": did, "server": "pupil-data", "tool": "write", "arguments": WRITE}
     v = f["request"](token, held=held)[1]["result"]
-    f["decide"](v["request_id"], v["user_code"], session=f["login"]())
+    f["decide"](v["request_id"], v["number"], session=f["login"]())
     again = f["request"](token, held=held)[1]["result"]
     assert again["status"] == "pending"
     assert again["request_id"] != v["request_id"]
@@ -745,7 +858,7 @@ def test_several_held_calls_are_released_with_one_approval(flow):
     assert len(view["held_actions"]) == 3
     assert view["held_action"] is None
     assert all("Draft absence letters" in a for a in view["held_actions"])
-    f["decide"](v["request_id"], v["user_code"], session=f["login"]())
+    f["decide"](v["request_id"], v["number"], session=f["login"]())
     child = f["call"](f["client"], token, "grants", "status", request_id=v["request_id"])[1]["result"]["mandate"]
     assert len(jwt.decode(child, options={"verify_signature": False})["preapproved"]) == 3
 
@@ -766,7 +879,7 @@ def test_twenty_five_pupils_in_one_draft_are_one_approval(flow):
     v = f["request"](token, held=held)[1]["result"]
     view = f["ic"].get(f"/requests/{v['request_id']}/view", headers={"x-approver-session": f["login"]()}).json()
     assert all(p in view["held_action"] for p in pupils)  # the person sees every pupil before approving
-    f["decide"](v["request_id"], v["user_code"], session=f["login"]())
+    f["decide"](v["request_id"], v["number"], session=f["login"]())
     child = f["call"](f["client"], token, "grants", "status", request_id=v["request_id"])[1]["result"]["mandate"]
     status, resp = f["call"](f["client"], child, "pupil-data", "draft", **held["arguments"])
     assert (status, resp["decision"]["reason_code"]) == (200, "PREAPPROVED")
@@ -812,7 +925,7 @@ def test_special_category_read_released_once(flow):
     assert (status, resp["decision"]["reason_code"]) == (202, "SPECIAL_CATEGORY")
     held = {"decision_id": resp["decision"]["decision_id"], "server": "pupil-data", "tool": "pupil", "arguments": args}
     v = f["request"](token, held=held)[1]["result"]
-    f["decide"](v["request_id"], v["user_code"], session=f["login"]())
+    f["decide"](v["request_id"], v["number"], session=f["login"]())
     child = f["call"](f["client"], token, "grants", "status", request_id=v["request_id"])[1]["result"]["mandate"]
     status, resp = f["call"](f["client"], child, "pupil-data", "pupil", **args)
     assert (status, resp["decision"]["reason_code"]) == (200, "PREAPPROVED")

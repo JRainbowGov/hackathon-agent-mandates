@@ -55,11 +55,11 @@ uv run python -m gateway.cli call --mandate dunmore.jwt --agent-key gateway/stat
 ```text
 200
 "result": {
-  "request_id": "sr_BYiYCNzhNgCG", "status": "pending", "user_code": "9YN3-EE4J",
+  "request_id": "sr_BYiYCNzhNgCG", "status": "pending", "number": 47,
   "approval_url": "http://localhost:8081/approve/sr_BYiYCNzhNgCG",
   "summary": "List Year 10 and 11 pupils' IDs and names at Brookmere High School (SCH02), for 2 hours.",
   "next_action": "ask_user",
-  "text": "Approval needed (code 9YN3-EE4J): ... Replying \"yes\" here does not approve it."
+  "text": "Approval needed: ... and choose 47 on the approval page. ... Replying \"yes\" here does not approve it."
 }
 ```
 
@@ -68,8 +68,13 @@ separately, labelled as the agent's words.
 
 ## What the person sees and does
 
-Opening the approval URL without signing in shows the summary and the code only. To decide, the person signs in with
-their approver key: a one-time link, valid 5 minutes.
+Approving works like number matching in a multi-device sign-in. Each request gets one two-digit number (10 to 99),
+which only the agent is told, and two different decoys. The page shows all three in an order shuffled once, when the
+request is made, so reloading shows the same order. Nothing the page or `/requests/{id}/view` returns says which one
+is right.
+
+Opening the approval URL without signing in shows the summary only, not the numbers. To decide, the person signs in
+with their approver key: a one-time link, valid 5 minutes.
 
 ```bash
 uv run python -m gateway.cli approver-login --principal officer:jsmith --approver-key jsmith-approver.pem \
@@ -77,16 +82,26 @@ uv run python -m gateway.cli approver-login --principal officer:jsmith --approve
 ```
 
 Signed in, the page shows what the agent can already do next to what it's asking for, the agent's ID, and its
-reason as plain text. The person types the code the agent showed them, can approve less (fewer grants, a shorter
-time), and approves or rejects. The same decision works from the terminal:
+reason as plain text, and the three numbers. The person chooses the number the agent gave them, can approve less
+(fewer grants, a shorter time), and approves or rejects. Rejecting needs no number. The same decision works from the
+terminal:
 
 ```bash
 uv run python -m gateway.cli approve sr_BYiYCNzhNgCG --principal officer:jsmith \
-  --approver-key jsmith-approver.pem --user-code 9YN3-EE4J
+  --approver-key jsmith-approver.pem --number 47
 ```
 
-Holding the URL or the code isn't enough to approve. Only the principal's approver key decides, and the issuer
+A wrong number ends the request, so a guess gets one try, not three. The request is marked rejected with
+`reason_code: NUMBER_MISMATCH` (audit event `approval_denied`, reason `NUMBER_MISMATCH`), and `grants.status` tells
+the agent `next_action: request_again`. Unlike a person's rejection, a mismatch doesn't block the agent asking again
+for the same thing (`RECENTLY_REJECTED`). The number is only checked once the right person is signed in, so a
+stranger's wrong guess can't end someone else's request.
+
+Holding the URL or the number isn't enough to approve. Only the principal's approver key decides, and the issuer
 checks it, not the page.
+
+An `issuer/state/requests.db` from before number matching (with a `user_code` column) is migrated in place when the
+issuer starts: its pending requests end as expired, and new requests get numbers.
 
 ## The new mandate, and a request it allows
 

@@ -45,7 +45,7 @@ from gateway.lib.scope_math import (
     within_ceiling,
 )
 from gateway.lib.trust_registry import TrustedList
-from issuer.store import MAX_PENDING, MAX_PER_HOUR, AlreadyDecided, Store
+from issuer.store import MAX_PENDING, MAX_PER_HOUR, NUMBER_MISMATCH, AlreadyDecided, Store
 
 log = logging.getLogger(__name__)
 
@@ -173,12 +173,14 @@ def agent_view(r: dict) -> dict:
     view = {
         "request_id": r["id"],
         "status": r["status"],
-        "user_code": r["user_code"],
+        "number": r["match_number"],  # the person chooses this one of three on the approval page
         "approval_url": f"{FRONTEND_URL}/approve/{r['id']}",
         "summary": summary_of(r),
         "approvers": [r["principal"], "a supervising agent with can_delegate"],
         "expires_at": r["expires"],
     }
+    if r.get("end_reason"):
+        view["reason_code"] = r["end_reason"]
     if r["status"] == "approved" and r.get("minted"):
         view["mandate"] = r["minted"]
         view["mandate_jti"] = r["minted_jti"]
@@ -530,7 +532,6 @@ def request_view(rid: str, x_approver_session: str | None = Header(default=None)
     view = {
         "request_id": r["id"],
         "status": r["status"],
-        "user_code": r["user_code"],
         "summary": r["requested"]["public_summary"],
         "expires_at": r["expires"],
         "principal": r["principal"],
@@ -540,6 +541,8 @@ def request_view(rid: str, x_approver_session: str | None = Header(default=None)
     }
     if principal == r["principal"]:
         view.update(
+            # all three, in the order fixed when the request was made; nothing in the view says which is right
+            number_options=r["match_options"] if r["status"] == "pending" else None,
             summary=r["requested"]["summary"],
             current=grants_words(r["requested"]["parent_scope"], clearance=r["parent_clearance"]),
             already_approved=still_granted(r),
@@ -554,7 +557,7 @@ def request_view(rid: str, x_approver_session: str | None = Header(default=None)
 
 class DecisionBody(BaseModel):
     decision: str
-    user_code: str
+    number: int | None = None  # the number chosen from the three on the page; needed to approve
     approved: dict | None = None
     signed: str | None = None  # a decision JWT signed with the approver key (cli approve)
 
@@ -569,8 +572,6 @@ def person_decision(rid: str, body: DecisionBody, x_approver_session: str | None
         store().refuse(rid, code)
         raise Refused(code, detail, status=status)
 
-    if body.user_code.strip().upper() != r["user_code"]:
-        refuse("USER_CODE_MISMATCH", "the code doesn't match this request")
     principal = None
     if body.signed:
         pub = _approver_pub(r["principal"])
@@ -596,7 +597,31 @@ def person_decision(rid: str, body: DecisionBody, x_approver_session: str | None
         refuse("NOT_THE_APPROVER", f"this request is for {r['principal']}")
     if r["status"] != "pending":
         refuse("ALREADY_DECIDED", r["status"])
-    return _approve_or_reject(r, body.decision, {"kind": "person", "id": principal}, body.approved)
+    person = {"kind": "person", "id": principal}
+    if body.decision == "approve":  # rejecting needs no number: saying no is the safe direction
+        _check_number(r, body.number, person)
+    return _approve_or_reject(r, body.decision, person, body.approved)
+
+
+def _check_number(r: dict, number: int | None, person: dict) -> None:
+    """Called only once the right person is signed in, so a stranger's wrong guess can't end the request.
+
+    A wrong pick ends the request: one guess, not three. It isn't the person saying no, so the agent may ask
+    again straight away (it doesn't count towards RECENTLY_REJECTED)."""
+    if number is None:
+        store().refuse(r["id"], "NUMBER_REQUIRED")
+        raise Refused("NUMBER_REQUIRED", "choose the number the agent gave you", status=400)
+    if number == r["match_number"]:
+        return
+    try:
+        r = store().decide(r["id"], "rejected", person, end_reason=NUMBER_MISMATCH)
+    except AlreadyDecided as e:
+        raise Refused("ALREADY_DECIDED", r["id"]) from e
+    store().refuse(r["id"], NUMBER_MISMATCH)
+    # no approver on the event, so its reason code is NUMBER_MISMATCH rather than NUMBER_MISMATCH_BY_PERSON
+    store().enqueue({"event_type": "approval_denied", "request": r, "reason_code": NUMBER_MISMATCH})
+    flush_events()
+    raise Refused(NUMBER_MISMATCH, "not the number the agent gave; the request has ended, so ask the agent again")
 
 
 @app.get("/healthcheck")

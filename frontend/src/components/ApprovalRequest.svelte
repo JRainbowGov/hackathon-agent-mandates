@@ -6,13 +6,14 @@
   type View = {
     request_id: string;
     status: string;
-    user_code: string;
     summary: string;
     expires_at: number;
     principal: string;
     level_4: boolean;
     signed_in_as: string | null;
     can_decide: boolean;
+    // signed-in principal only: three numbers in a fixed order; the view never says which one is right
+    number_options?: number[] | null;
     current?: string;
     // earlier approvals for the same mandate that still work: shown so many small asks read as their total
     already_approved?: { request_id: string; summary: string; expires_at: number }[];
@@ -26,8 +27,8 @@
   let { requestId }: { requestId: string } = $props();
   let view = $state<View | null>(null);
   let loadError = $state('');
-  let code = $state('');
-  let codeError = $state('');
+  let chosen = $state<number | null>(null);
+  let numberError = $state('');
   let decideError = $state('');
   let busy = $state(false);
   let keep = $state<boolean[]>([]);
@@ -61,10 +62,10 @@
   }
 
   async function decide(decision: 'approve' | 'reject') {
-    codeError = '';
+    numberError = '';
     decideError = '';
-    if (!code.trim()) {
-      codeError = 'Enter the code the agent showed you.';
+    if (decision === 'approve' && chosen === null) {
+      numberError = 'Choose the number the agent gave you.';
       return;
     }
     if (decision === 'approve' && view?.requested && !keep.some(Boolean)) {
@@ -76,9 +77,10 @@
       const res = await fetch(`/api/approve/decision/${encodeURIComponent(requestId)}`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ decision, user_code: code, approved: decision === 'approve' ? narrowed() : null }),
+        body: JSON.stringify({ decision, number: chosen, approved: decision === 'approve' ? narrowed() : null }),
       });
       const body = await res.json();
+      if (body.error === 'NUMBER_MISMATCH') await load(); // the request has ended: show it as such
       if (!res.ok) throw new Error(body.detail ?? body.error ?? res.statusText);
       await load();
     } catch (e) {
@@ -100,11 +102,6 @@
 {:else if !view}
   <p class="govuk-body">Loading the request…</p>
 {:else}
-  <div class="govuk-panel approval-code">
-    <p class="govuk-body govuk-!-margin-bottom-1">Check the agent showed you this code</p>
-    <p class="govuk-heading-xl govuk-!-margin-bottom-0 approval-code__value">{view.user_code}</p>
-  </div>
-
   <dl class="govuk-summary-list">
     <div class="govuk-summary-list__row">
       <dt class="govuk-summary-list__key">Asking for</dt>
@@ -204,11 +201,22 @@
           </select>
         </div>
       </fieldset>
-      <div class="govuk-form-group" class:govuk-form-group--error={codeError}>
-        <label class="govuk-label" for="code">Type the code the agent showed you</label>
-        {#if codeError}<p class="govuk-error-message">{codeError}</p>{/if}
-        <input class="govuk-input govuk-input--width-10" id="code" autocomplete="off" bind:value={code}
-          oninput={() => (codeError = '')} />
+      <div class="govuk-form-group" class:govuk-form-group--error={numberError}>
+        <fieldset class="govuk-fieldset">
+          <legend class="govuk-fieldset__legend govuk-fieldset__legend--s">Choose the number the agent gave you</legend>
+          <p class="govuk-hint">To approve, pick the number the agent told you. A wrong one ends this request and the
+            agent has to ask again.</p>
+          {#if numberError}<p class="govuk-error-message">{numberError}</p>{/if}
+          <div class="govuk-radios govuk-radios--inline number-match">
+            {#each view.number_options ?? [] as n (n)}
+              <div class="govuk-radios__item">
+                <input class="govuk-radios__input" id={`number-${n}`} type="radio" name="number" value={n}
+                  bind:group={chosen} onchange={() => (numberError = '')} />
+                <label class="govuk-label govuk-radios__label number-match__label" for={`number-${n}`}>{n}</label>
+              </div>
+            {/each}
+          </div>
+        </fieldset>
       </div>
       {#if decideError}<p class="govuk-error-message">{decideError}</p>{/if}
       <div class="govuk-button-group">
@@ -222,7 +230,6 @@
 {/if}
 
 <style>
-  .approval-code { background: #1d70b8; color: #fff; padding: 15px 20px; }
-  .approval-code__value { color: #fff; letter-spacing: 0.08em; font-family: monospace; }
+  .number-match__label { font-size: 1.5rem; font-weight: 700; font-family: monospace; }
   .agent-words { white-space: pre-wrap; overflow-wrap: anywhere; }
 </style>

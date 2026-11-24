@@ -67,7 +67,7 @@ The gateway's mount shrinks to `trusted_list.json`, `status_list.jwt`, `tool_gra
 - The CLI's `issue` and `revoke` keep working locally. They write the same files the issuer service reads.
 
 ### 4. Where requests live
-Scope requests are a small table in the issuer service: `id`, `requester_jti`, `requester_agent_id`, `principal`, the requested grant (canonical JSON), the reason, `user_code`, `created`, `expires`, `status`, `decided_by`, `minted_jti`. It lives in SQLite at `issuer/state/requests.db`, because the issuer must survive alone, and SQLite gives one-decision-only through a `status='pending'` conditional update. The gateway calls the issuer over the Compose network for create, status and decide. Request throttling (pending count, requests per hour, identical recent rejection) reads this table, not `history(jti)`, which has no such counts.
+Scope requests are a small table in the issuer service: `id`, `requester_jti`, `requester_agent_id`, `principal`, the requested grant (canonical JSON), the reason, `match_number` and `match_options` (the number the person must choose and the three shown, in a fixed shuffled order), `end_reason` (`NUMBER_MISMATCH` when a wrong number ended it), `created`, `expires`, `status`, `decided_by`, `minted_jti`. It lives in SQLite at `issuer/state/requests.db`, because the issuer must survive alone, and SQLite gives one-decision-only through a `status='pending'` conditional update. The gateway calls the issuer over the Compose network for create, status and decide. Request throttling (pending count, requests per hour, identical recent rejection) reads this table, not `history(jti)`, which has no such counts.
 - *Alternative:* Postgres. Not available where we deploy (the same reason the audit trail uses SQLite).
 
 ### 4a. Issuer events reach the audit chain
@@ -81,7 +81,7 @@ Scope requests are a small table in the issuer service: `id`, `requester_jti`, `
 - **CLI:** `cli approve <request_id> --approver-key ...`. It signs `{request_id, decision, approved_grant_hash}`.
 - **Page:** `cli approver-login --principal ... --approver-key ...` prints a one-time login link. It is a token signed by the approver key, valid for 5 minutes and single use. Opening it sets an HTTP-only session cookie on the issuer page.
 
-The agent never holds an approver key. URL and user code are only identifiers.
+The agent never holds an approver key. URL and number are only identifiers: the number lets the person match the page to what the agent said, and a wrong one ends the request.
 - *Alternative:* WebAuthn passkeys. They're the right production answer, but too much for Day 1. The flow stays the same when they replace the key.
 - *Alternative:* trust the network or a shared password. Rejected: it reproduces `/demo/mandate`.
 
@@ -173,7 +173,7 @@ Throttling and single use don't use `history(jti)`; it lacks the counts they nee
 - [Grants add latency and a failure mode: a clock skew between containers breaks calls] → Grants live 30 s; all containers share the host clock; verification allows 5 s of skew; failures name the reason.
 - [The server-side filter changes results for claim-less mandates] → The grant derives from the same entry the gateway matched. A parity test runs the full eval with grants enforced and compares rows. The `max_rows` default of 100 matches the server's own default.
 - [This change edits `check_request` after the question 3–5 fixes] → Rebased onto `ihor` on 23 Nov. Audience slots in after the "any one entry accepts every argument" loop, and `TOO_MUCH` stays the bulk reason.
-- [The approval page adds a web surface (cookies, cross-site requests)] → The session cookie is HTTP-only, `SameSite=Strict` and path-scoped. Decisions are POST-only and carry the request's user code. The issuer re-verifies everything.
+- [The approval page adds a web surface (cookies, cross-site requests)] → The session cookie is HTTP-only, `SameSite=Strict` and path-scoped. Decisions are POST-only, and an approval carries the number the person chose; a wrong one ends the request. The issuer re-verifies everything.
 - [The audit table's argument-hash slot is needed for `action_hash`] → Agree it in task 1.2, or add one optional field in the audit change.
 - [`grants` sits at level 1, so mandates without `clearance` (the eval, the Day 2 default, `make gateway_issue`) can't introspect or ask for more] → Intended: legacy mandates behave as before. Agents that should escalate get a mandate with `clearance`. The docs and the shim's setup issue one.
 - [The `mandate-clearance` delta copies a requirement that `add-audit-trail` also modifies] → Re-copy it from main after the rebase (task 1.4), keeping both changes' entries and scenarios.

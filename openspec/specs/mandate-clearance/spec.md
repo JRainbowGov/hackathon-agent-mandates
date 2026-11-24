@@ -43,11 +43,16 @@ For a mandate that carries `clearance`, the gateway SHALL deny any call to a ser
 - **THEN** the gateway returns `403 DENY` with reason `OUT_OF_SCOPE`
 
 ### Requirement: Mandates without clearance keep today's behaviour on pupil-data and are refused on interface servers
-For a mandate with no `clearance` claim, the gateway SHALL apply no clearance check to `pupil-data`, so every existing decision there is unchanged. The same mandate calling `schools`, `directory` or `special` MUST be denied with `403` and reason `CLEARANCE_MISSING`.
+For a mandate with no `clearance` claim, the gateway SHALL apply no clearance check to `pupil-data`, so every existing decision there is unchanged. What such a call returns SHALL stop at level 3: the tool grant for it MUST carry level 3, so the server drops special category (level 4) columns such as `Ethnicity` and `InCareAtCurrentSchool` from every row. The same mandate calling `schools`, `directory` or `special` MUST be denied with `403` and reason `CLEARANCE_MISSING`.
 
 #### Scenario: Default mandate unchanged
 - **WHEN** the default mandate from `make gateway_issue` (no `clearance`) calls `pupil-data.search(query="P0004", urn="SCH01", limit=1)`
 - **THEN** the gateway returns `200 ALLOW` with reason `IN_SCOPE`, as before this change
+
+#### Scenario: Default mandate gets no special category data
+- **WHEN** the same call is forwarded to `pupil-data` over HTTP
+- **THEN** its tool grant carries level 3, and the rows returned have no `Ethnicity` or `InCareAtCurrentSchool` column
+- **AND** the same call under a mandate with `clearance: 4` returns those columns
 
 #### Scenario: Default mandate on a new server
 - **WHEN** a mandate with no `clearance` whose scope lists `schools.list` calls `schools.list`
