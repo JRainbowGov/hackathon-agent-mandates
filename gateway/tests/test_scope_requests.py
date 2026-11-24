@@ -498,9 +498,11 @@ def test_correction_approved_and_applied_once(flow, tmp_path, monkeypatch):
     status, resp = f["call"](f["client"], child, "pupil-data", "write", **WRITE)
     assert (status, resp["decision"]["reason_code"]) == (200, "PREAPPROVED")
     status, resp = f["call"](f["client"], child, "pupil-data", "write", **WRITE)
-    assert (status, resp["decision"]["reason_code"]) == (202, "SENSITIVE_TOOL")
-    status, _ = f["call"](f["client"], child, "pupil-data", "write", **{**WRITE, "value": "0"})
-    assert status == 202
+    assert (status, resp["decision"]["reason_code"]) == (403, "NOT_RELEASED")  # once only
+    status, resp = f["call"](f["client"], child, "pupil-data", "write", **{**WRITE, "value": "0"})
+    assert (status, resp["decision"]["reason_code"]) == (403, "NOT_RELEASED")  # only the released call
+    status, resp = f["call"](f["client"], token, "pupil-data", "write", **WRITE)
+    assert (status, resp["decision"]["reason_code"]) == (202, "SENSITIVE_TOOL")  # the base mandate still holds it
     exp = jwt.decode(child, options={"verify_signature": False})
     assert exp["exp"] - exp["iat"] <= 300
 
@@ -753,9 +755,10 @@ def test_several_held_calls_are_released_with_one_approval(flow):
         status, resp = f["call"](f["client"], child, "pupil-data", "draft", **h["arguments"])
         assert (status, resp["decision"]["reason_code"]) == (200, "PREAPPROVED")
     status, resp = f["call"](f["client"], child, "pupil-data", "draft", **held[0]["arguments"])
-    assert (status, resp["decision"]["reason_code"]) == (202, "SENSITIVE_TOOL")  # not twice
+    assert (status, resp["decision"]["reason_code"]) == (403, "NOT_RELEASED")  # not twice
     other = {"urn": "SCH04", "pupil_ids": _pupils_at_sch04(4)[3:], "kind": "absence"}
-    assert f["call"](f["client"], child, "pupil-data", "draft", **other)[0] == 202  # nor one that wasn't approved
+    status, resp = f["call"](f["client"], child, "pupil-data", "draft", **other)
+    assert (status, resp["decision"]["reason_code"]) == (403, "NOT_RELEASED")  # nor one that wasn't approved
 
 
 def test_twenty_five_pupils_in_one_draft_are_one_approval(flow):
@@ -818,7 +821,7 @@ def test_special_category_read_released_once(flow):
     assert (status, resp["decision"]["reason_code"]) == (200, "PREAPPROVED")
     assert "Ethnicity" in resp["result"]
     status, resp = f["call"](f["client"], child, "pupil-data", "pupil", **args)
-    assert (status, resp["decision"]["reason_code"]) == (202, "SPECIAL_CATEGORY")
+    assert (status, resp["decision"]["reason_code"]) == (403, "NOT_RELEASED")
 
 
 def test_check_suggests_the_mandates_own_clearance_for_pupil_data(flow):
@@ -831,3 +834,96 @@ def test_check_suggests_the_mandates_own_clearance_for_pupil_data(flow):
     missing = resp["result"]["missing"]
     assert missing["clearance"] == 2  # not 4: that would hold every read
     assert "lowest clearance" in missing["note"]
+
+
+# ---------------------------------------------------------------- release-only-held-calls
+
+CENSUS = "synthetic/synthetic_personal_data_school_census.csv"
+
+
+def _released_census_read(f):
+    """A clearance-4 mandate that may read only the census file; its read is held and the person releases it. The
+    person may grant at every school: a file read names no school, so a school list would refuse it."""
+    (f["state"] / "principals.json").write_text(json.dumps({PRINCIPAL: {**CEILING[PRINCIPAL], "urns": "*"}}))
+    scope = [{"server": "pupil-data", "tools": ["get"], "constraints": {"path": [CENSUS]}}]
+    token = f["mandate"](scope, clearance=4)
+    status, resp = f["call"](f["client"], token, "pupil-data", "get", path=CENSUS)
+    assert (status, resp["decision"]["reason_code"]) == (202, "SPECIAL_CATEGORY")
+    held = {"decision_id": resp["decision"]["decision_id"], "server": "pupil-data", "tool": "get",
+            "arguments": {"path": CENSUS}}  # fmt: skip
+    v = f["request"](token, held=held)[1]["result"]
+    assert v["status"] == "pending"
+    f["decide"](v["request_id"], v["user_code"], session=f["login"]())
+    child = f["call"](f["client"], token, "grants", "status", request_id=v["request_id"])[1]["result"]["mandate"]
+    return token, child
+
+
+def test_a_released_read_opens_no_other_file(flow):
+    """24 Nov red team: the release mandate's scope is `get` with no path constraint; it must still read only the
+    released file, once."""
+    f = flow
+    _, child = _released_census_read(f)
+    assert jwt.decode(child, options={"verify_signature": False})["scope"][0]["constraints"] == {}
+    status, resp = f["call"](f["client"], child, "pupil-data", "get", path="synthetic/synthetic_display_names.csv")
+    assert (status, resp["decision"]["reason_code"]) == (403, "NOT_RELEASED")
+    assert "result" not in resp
+    status, resp = f["call"](f["client"], child, "pupil-data", "get", path=CENSUS)
+    assert (status, resp["decision"]["reason_code"]) == (200, "PREAPPROVED")
+
+
+def test_a_release_mandate_keeps_other_refusals(flow):
+    f = flow
+    _, child = _released_census_read(f)
+    status, resp = f["call"](f["client"], child, "pupil-data", "write", **WRITE)  # deny carries "*.write"
+    assert (status, resp["decision"]["reason_code"]) == (403, "DENIED_BY_RULE")
+
+
+def test_a_scope_approval_is_not_a_release_mandate(flow):
+    f = flow
+    base = f["mandate"](roster("SCH04"), clearance=2)
+    _, child = _approve(f, base, roster("SCH02"))
+    for _ in range(2):
+        status, resp = f["call"](f["client"], child, "directory", "roster", **{**SCH04_Y11, "urn": "SCH02"})
+        assert (status, resp["decision"]["reason_code"]) == (200, "IN_SCOPE")
+
+
+def _straight_to_issuer(f, token, key, held):
+    """A signed grants.request posted to the issuer's internal route, as an agent that bypasses the gateway would."""
+    body = cli.sign_request(key, server="grants", tool="request", mandate=token,
+                            arguments={"held": held, "reason": "release my held call", "ttl": 300})  # fmt: skip
+    return f["ic"].post("/internal/requests", json={"call": body})
+
+
+def test_issuer_refuses_a_made_up_held_call_outside_the_mandate(flow):
+    """24 Nov red team: a Dunmore roster mandate named a Brookmere search that was never held, and got a page."""
+    f = flow
+    key, _ = generate_keypair()
+    token = f["mandate"](roster("SCH04"), clearance=2, key=key)
+    held = {"decision_id": "never-held", "server": "pupil-data", "tool": "search",
+            "arguments": {"urn": "SCH02", "query": "a"}}  # fmt: skip
+    r = _straight_to_issuer(f, token, key, held)
+    assert (r.status_code, r.json()["error"]) == (403, "HELD_OUTSIDE_MANDATE")
+    assert f["call"](f["client"], token, "grants", "self", key=key)[1]["result"]["pending_requests"] == []
+
+
+def test_issuer_refuses_a_held_call_the_mandate_allows_outright(flow):
+    f = flow
+    key, _ = generate_keypair()
+    token = f["mandate"]([{"server": "pupil-data", "tools": ["get"]}], clearance=4, key=key)
+    held = {"decision_id": "never-held", "server": "pupil-data", "tool": "get",
+            "arguments": {"path": "synthetic/synthetic_schools.csv"}}  # fmt: skip
+    r = _straight_to_issuer(f, token, key, held)
+    assert (r.status_code, r.json()["error"]) == (403, "HELD_OUTSIDE_MANDATE")
+
+
+def test_issuer_refuses_a_batch_with_one_call_outside_the_mandate(flow):
+    f = flow
+    key, _ = generate_keypair()
+    token = f["mandate"](DRAFT_SCOPE, deny=[], clearance=4, key=key)
+    inside = {"decision_id": "d1", "server": "pupil-data", "tool": "draft",
+              "arguments": {"urn": "SCH04", "pupil_ids": _pupils_at_sch04(1), "kind": "absence"}}  # fmt: skip
+    outside = {"decision_id": "d2", "server": "pupil-data", "tool": "draft",
+               "arguments": {"urn": "SCH02", "pupil_ids": ["P0001"], "kind": "absence"}}  # fmt: skip
+    r = _straight_to_issuer(f, token, key, [inside, outside])
+    assert (r.status_code, r.json()["error"]) == (403, "HELD_OUTSIDE_MANDATE")
+    assert f["call"](f["client"], token, "grants", "self", key=key)[1]["result"]["pending_requests"] == []

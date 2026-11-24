@@ -32,7 +32,7 @@ from pydantic import BaseModel
 from gateway.cli import _load_status, issue_mandate
 from gateway.lib.audit import sign_external_event
 from gateway.lib.common import canonical, jwk_to_pub, pub_to_pem, sha256_hex, verify_bytes
-from gateway.lib.gateway_verify import Reject, Request, verify_mandate
+from gateway.lib.gateway_verify import STEP_UP_PATTERNS, Reject, Request, check_request, verify_mandate
 from gateway.lib.grant_words import action_words, grants_words, marks_level_4
 from gateway.lib.scope_math import (
     Invalid,
@@ -160,6 +160,35 @@ def _held_union_scope(calls: list[dict]) -> list[dict]:
     return scope
 
 
+def _check_held_against(claims: dict, calls: list[dict]) -> None:
+    """Refuse unless the requesting mandate would itself hold every named call (release-only-held-calls).
+
+    The gateway checks a held call against its audit trail; this route can be reached without the gateway, so the
+    issuer re-runs the gateway's own decision on each call. It can't prove the call was made, only that the
+    mandate covers it and would hold it, so nothing outside the mandate is put in front of a person.
+    """
+    for c in calls:
+        hypothetical = Request(server=c["server"], tool=c["tool"], arguments=c["arguments"], mandate="", nonce="",
+                               ts=0, sig="")  # fmt: skip
+        try:
+            decision, code, _ = check_request(
+                hypothetical, claims.get("scope", []), claims.get("deny", []), list(STEP_UP_PATTERNS), claims
+            )
+        except Exception as e:  # a call the check can't read is not one this mandate would hold
+            raise Refused("HELD_OUTSIDE_MANDATE", f"{c['server']}.{c['tool']}: {type(e).__name__}") from e
+        if decision != "STEP_UP":
+            raise Refused("HELD_OUTSIDE_MANDATE", f"{c['server']}.{c['tool']} would not be held: {decision} {code}")
+
+
+def _requested_held(claims: dict, held) -> list[dict] | None:
+    """The held calls a request names, well formed and each one the requesting mandate would hold; None if none."""
+    if held is None:
+        return None
+    calls = _held_list(held)
+    _check_held_against(claims, calls)
+    return calls
+
+
 def held_words(calls: list[dict]) -> list[str]:
     return [action_words(c["server"], c["tool"], c["arguments"]) for c in calls]
 
@@ -198,7 +227,7 @@ def create_request(body: CreateBody):
         # revocation of the original, which the parent check doesn't follow)
         raise Refused("REQUEST_INVALID", "ask with the original mandate, not a supplementary one")
     args = body.call["arguments"]
-    held = _held_list(args["held"]) if args.get("held") is not None else None
+    held = _requested_held(claims, args.get("held"))
     clearance, ttl, reason = args.get("clearance"), args.get("ttl", 3600), args.get("reason", "")
     scope = _held_union_scope(held) if held else args.get("scope")
     try:

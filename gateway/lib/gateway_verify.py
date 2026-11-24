@@ -34,6 +34,9 @@ CLOCK_SKEW = 30
 # Most rows one call may ask for (the MCP server's own default).
 # shortcut: per call only, many small calls still add up (question 11); add a per-mandate budget for that
 MAX_ROWS = 100
+# calls held for a person's approval (202 STEP_UP), unless the mandate pre-approved them. The issuer uses the same
+# list to check that a held call it is asked to release is one the requesting mandate would hold.
+STEP_UP_PATTERNS = ("*.write", "*.draft", "special.*")
 # scope-constrained arguments the audit trail may record by value: they say whose data a call concerned
 AUDITED_SCOPE_KEYS = ("urn", "pupil_id")
 
@@ -302,12 +305,12 @@ class Gateway:
     def __init__(self, registry, status_lists: dict[str, str], step_up_patterns: list[str] | None = None):
         self.registry = registry
         self.status_lists = status_lists
-        self.step_up = step_up_patterns or ["*.write", "*.draft", "special.*"]
+        self.step_up = step_up_patterns or list(STEP_UP_PATTERNS)
         self._seen_nonces: set[str] = set()
         self.preapproval_uses = PreapprovalUses(os.environ.get("GATEWAY_STATE_DB"))
 
     def _preapproved(self, req: Request, claims: dict) -> str | None:
-        """The action hash when this held call is pre-approved by the mandate and not yet used, else None.
+        """The action hash when this call is pre-approved by the mandate and not yet used, else None.
 
         Using it is recorded here, before the call is forwarded, so it goes through once.
         """
@@ -319,6 +322,15 @@ class Gateway:
         if ah not in preapproved:
             return None
         return ah if self.preapproval_uses.use(claims["jti"], ah) else None
+
+    def _released_only(self, req: Request, claims: dict, decided: tuple[str, str, str]) -> tuple[str, str, str]:
+        """A mandate minted to release held calls (release-only-held-calls) allows its released calls, once each, and
+        nothing else, whatever its scope says: its scope is only pinned to the held calls' school and pupil."""
+        if not claims.get("preapproved") or decided[0] == "DENY":
+            return decided  # not a release mandate, or another check already refused: that refusal stands
+        if ah := self._preapproved(req, claims):
+            return "ALLOW", "PREAPPROVED", ah
+        return "DENY", "NOT_RELEASED", f"{req.server}.{req.tool} is not a released call of this mandate, or was used"
 
     def decide(self, req: Request) -> Decision:
         return self.decide_with_context(req)[0]
@@ -350,8 +362,7 @@ class Gateway:
                 req, claims["scope"], claims["deny"], self.step_up, claims, matched
             )
             ctx.entry = matched[0] if matched else None
-            if decision == "STEP_UP" and (ah := self._preapproved(req, claims)):
-                decision, code, detail = "ALLOW", "PREAPPROVED", ah
+            decision, code, detail = self._released_only(req, claims, (decision, code, detail))
             return Decision(decision, code, agent_id=claims["agent_id"], detail=detail, **base), ctx
         except Reject as r:
             result = Decision("DENY", r.code, agent_id=None, detail=r.detail, **base)

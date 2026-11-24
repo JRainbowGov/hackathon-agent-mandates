@@ -236,11 +236,11 @@ Any other call SHALL be held as before. The record of used pre-approvals SHALL s
 
 #### Scenario: Correction approved and applied once
 - **WHEN** `pupil-data.write(pupil_id="P0011", urn="SCH04", column="FSMeligible", value="1", reason="...")` was held, the person approved a request naming its `decision_id`, and the agent retries the same call with the minted mandate
-- **THEN** the gateway returns `200 ALLOW`, and the same call made again with that mandate returns `202 STEP_UP`
+- **THEN** the gateway returns `200 ALLOW`, and the same call made again with that mandate returns `403 DENY` with reason `NOT_RELEASED` (release-only-held-calls)
 
 #### Scenario: Different arguments are held
 - **WHEN** the agent uses the same minted mandate for `pupil-data.write` with `value="0"`
-- **THEN** the gateway returns `202 STEP_UP`
+- **THEN** the gateway returns `403 DENY` with reason `NOT_RELEASED` (release-only-held-calls)
 
 ### Requirement: Agents can't wear the person down
 The gateway SHALL refuse a new scope request from a mandate that has 3 pending requests, or that has made 10 requests in the last hour, with reason `TOO_MANY_REQUESTS`. A request identical to one rejected in the last hour SHALL be refused with reason `RECENTLY_REJECTED`. These counts SHALL come from the store of scope requests, so they hold across gateway restarts.

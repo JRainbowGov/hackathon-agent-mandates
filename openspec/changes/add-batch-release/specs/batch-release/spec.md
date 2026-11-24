@@ -30,8 +30,8 @@ The approval page SHALL list every held call in the request in plain words, ever
 - **THEN** the signed-in approver's view names all 25 pupils
 
 ### Requirement: Each released call goes through once
-On approval, the minted mandate SHALL pre-approve one action hash per held call. Each released call SHALL be allowed once with reason `PREAPPROVED`. Repeating a released call, or making a call that wasn't in the request, SHALL be held again with `SENSITIVE_TOOL`.
+On approval, the minted mandate SHALL pre-approve one action hash per held call. Each released call SHALL be allowed once with reason `PREAPPROVED`. Repeating a released call, or making a call that wasn't in the request, SHALL be refused with `403 NOT_RELEASED` (release-only-held-calls).
 
 #### Scenario: Released once each
 - **WHEN** three held drafts were approved together, and the agent makes each once and then repeats the first
-- **THEN** the three calls return `200 PREAPPROVED`, and the repeat returns `202 SENSITIVE_TOOL`
+- **THEN** the three calls return `200 PREAPPROVED`, and the repeat returns `403 NOT_RELEASED`

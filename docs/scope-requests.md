@@ -118,7 +118,14 @@ kills the new mandate too (`PARENT_REVOKED`).
 A `pupil-data.write` is held (`202 SENSITIVE_TOOL`). The agent asks with
 `held: {decision_id, server, tool, arguments}`. The person sees "Change FSMeligible to 1 for pupil P0011 at Dunmore
 Community College (SCH04)". The approved mandate lets that exact call through once (`200 PREAPPROVED`) within 5
-minutes. Different arguments, or a second try, are held again.
+minutes, and nothing else (release-only-held-calls). Under that mandate a second try, different arguments, or any
+other call, even one its scope seems to allow, gets `403 NOT_RELEASED`. Made with the base mandate, the same call is
+held again (`202`), so the shim, which falls back to the base mandate, shows a fresh hold.
+
+The issuer also checks each held call it is asked to release against the requesting mandate. A call that mandate
+wouldn't hold (outside its scope, or allowed outright) is refused with `403 HELD_OUTSIDE_MANDATE` and no request is
+created, even when the request reaches the issuer without going through the gateway. The issuer can't see the
+gateway's audit trail, so it can't prove the call was made, only that it is one the mandate would hold.
 
 ## From Claude Code: the MCP shim
 
