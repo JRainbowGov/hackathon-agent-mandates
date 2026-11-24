@@ -53,8 +53,8 @@ The eval SHALL print one line per case, then a total per question (`Question N: 
 - **WHEN** a GAP case's probe starts passing
 - **THEN** the eval prints `GAP-FIXED` for it and still exits 0
 
-### Requirement: The flood case is opt-in
-The case for the unverified-source ceiling SHALL run only when `--flood` (or `EVAL_FLOOD=1`) is given. Otherwise it is reported as a `NOTE` saying it was skipped. When it runs, it SHALL send forged requests until the ceiling answers, and expect `429 RATE_LIMITED` with a `Retry-After` header. It is meant for a gateway started with a low `GATEWAY_LIMIT_CEILINGS_UNVERIFIED_PER_SOURCE_PER_MINUTE`.
+### Requirement: The flood case is opt-in and runs alone
+The case for the unverified-source ceiling SHALL run only when `--flood` (or `EVAL_FLOOD=1`) is given, and then SHALL run alone, after the preflight, with no other case. Without the flag it is reported as a `NOTE`. When it runs, it SHALL send forged requests until the ceiling answers, and expect `429 RATE_LIMITED` with a `Retry-After` header. It is meant for a gateway started with a low `GATEWAY_LIMIT_CEILINGS_UNVERIFIED_PER_SOURCE_PER_MINUTE`.
 
 #### Scenario: Default run
 - **WHEN** `make eval_questions` runs without `--flood`
@@ -82,7 +82,7 @@ The eval SHALL import `VALID`, `INVALID`, `BUILD` and the scopes from `gateway.e
   - `NOT_YET_VALID` for an `nbf` an hour ahead;
   - `REVOKED`;
   - `PARENT_REVOKED` for a supplementary mandate whose parent is revoked.
-- **2:** the INVALID cases, plus `directory.roster` at clearance 1, which is `CLEARANCE_TOO_LOW`.
+- **2:** the INVALID cases, plus `directory.roster` at clearance 1, which is `CLEARANCE_TOO_LOW`. A GAP: a lone surrogate (`\ud800`) in an argument is refused (400, 403 or 422), not answered with a 500.
 - **3:** an empty query, a whitespace query, limit `1000`, `"1000"` and `1000.0` are all `TOO_MUCH`. `query: ","` returns at most 100 rows.
 - **4:** `./` and `//` spellings of the allowed file are ALLOW. `..`, a percent-encoded `..`, backslashes and an absolute path to the names file are refused.
 - **5:**
@@ -124,7 +124,7 @@ The eval SHALL check:
   - different arguments are held;
   - a decision posted with the URL and code but no key, or signed with a key that isn't the approver's, is refused, and the request stays `pending`.
 - **10:**
-  - `grants.self`'s summary names the school by name and says how long the access lasts;
+  - `grants.self`'s summary names the school by name and says when the access ends ("Valid until …");
   - `grants.request`'s text has the approval URL and user code and says a chat reply doesn't approve it.
   - GAP: there is no way to draft a mandate from the person's sentence.
 
@@ -144,12 +144,12 @@ The eval SHALL check:
   - the same pupil again is ALLOW;
   - with `rate.per_minute: 2`, the third call is `429 RATE_LIMITED` with a `Retry-After` header;
   - for a mandate with no budget or rate claim, six refusals raise one `ALERT_REFUSALS` and leave the decisions unchanged;
-  - three mandates receiving the same pupil raise `ALERT_PUPIL_TARGETED`, visible through `audit.events`.
+  - three mandates receiving the same pupil raise `ALERT_PUPIL_TARGETED`, visible through `audit.events`. The pupil is a random quiet one, not P0004, whose hourly alert is already used up.
 - **12:**
   - a letters mandate (`roster` and `draft` only) asking for in-care counts is `OUT_OF_SCOPE`.
   - GAP: two mandates for one school with different `purpose` should get different decisions for a purpose-unrelated call.
 - **13:**
-  - a request beyond the person's limits is `EXCEEDS_PRINCIPAL`.
+  - a request beyond the person's limits is `EXCEEDS_PRINCIPAL` (for the eval person `eval:shrink`, limited to SCH05).
   - GAP: a mandate should stop working after its person's limits shrink.
 - **14:**
   - after three allowed searches and a revoke, `audit.saw` lists exactly those pupils, with `max_pii_level` and `revoked: true`;
@@ -161,7 +161,7 @@ The eval SHALL check:
   - `ASIA` and `2_OTH` searches return 0 rows below the clearance that shows them.
 - **16:**
   - the person's own `audit.events` include `agent_id`, a source address and a `decision_id` matching the response;
-  - another person's log is `CONSTRAINT_VIOLATED`;
+  - another person's log is `CONSTRAINT_VIOLATED` (the person is `eval:questions`; the other person is `officer:jsmith`);
   - an operational mandate (no clearance) reading the log is `CLEARANCE_MISSING`;
   - forged calls carrying the person's `jti` appear under `claimed`.
 

@@ -279,6 +279,23 @@ def claims_of(token: str) -> dict:
     return json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
 
 
+CENSUS_FILE = (
+    Path(__file__).resolve().parents[1] / "mcp_server/data/synthetic/synthetic_personal_data_school_census.csv"
+)
+
+
+def quiet_pupils() -> list[tuple[str, str]]:
+    """(urn, pupil) for pupils currently (2023/24 SPR) at schools the other cases leave alone. Read, never changed."""
+    import csv  # noqa: PLC0415
+
+    with CENSUS_FILE.open(newline="") as f:
+        return [
+            (r["URN"], r["Psuedo ID"])
+            for r in csv.DictReader(f)
+            if (r["AcademicYear"], r["CensusTerm"]) == ("2023/24", "SPR") and r["URN"] in ("SCH08", "SCH10", "SCH12")
+        ]
+
+
 class Run:
     def __init__(self, url: str, state: Path, issuer_url: str, *, flood: bool = False):
         self.url, self.state, self.issuer_url, self.flood = url.rstrip("/"), state, issuer_url.rstrip("/"), flood
@@ -288,6 +305,9 @@ class Run:
         self.pending: list[tuple[str, str, str]] = []  # (request_id, user_code, principal) to reject at the end
         self._finder = None
         self._audit = None
+        self.current: int | None = None  # the question being run
+        self.seen: dict[int, list] = {}  # question -> [responses, generic problems]
+        self.added = False  # eval principals are in the shared files
 
     # -------------------------------------------------- plumbing
 
@@ -320,7 +340,12 @@ class Run:
 
     def call(self, key, mandate: str, server: str, tool: str, arguments: dict, **override) -> Resp:
         data = sa.signed(mandate, server, tool, arguments, key=key, **override)
-        return Resp(*sa.post_full("/tools/call", data, self.url))
+        resp = Resp(*sa.post_full("/tools/call", data, self.url))
+        if self.current is not None:  # every response, whether or not a case checks it (see run())
+            seen = self.seen.setdefault(self.current, [0, []])
+            seen[0] += 1
+            seen[1] += [f"{server}.{tool}: {p}" for p in generic_problems(resp)]
+        return resp
 
     def raw(self, data: bytes) -> Resp:
         return Resp(*sa.post_full("/tools/call", data, self.url))
@@ -375,6 +400,7 @@ class Run:
         def add_a(doc):
             doc.update({p: pub_to_jwk(k.public_key()) for p, k in self.approvers.items()})
 
+        self.added = True
         self._edit_json("principals.json", add_p)
         self._edit_json("approvers.json", add_a)
 
@@ -466,7 +492,11 @@ class Run:
 
     def preflight(self) -> None:
         k = self.key(0, "preflight")
-        token = self.mint(cli.DEFAULT_SCOPE, key=k)
+        try:
+            token = self.mint(cli.DEFAULT_SCOPE, key=k)
+        except (OSError, KeyError, ValueError) as e:
+            msg = f"can't mint from {self.state} ({type(e).__name__}: {e}): set GATEWAY_STATE_DIR to the issuer state"
+            raise PreflightError(msg) from e
         r = self.call(k, token, PD, "search", {"query": "P0004", "urn": "SCH01"})
         if r.status == 0:
             msg = f"no answer from {self.url}: set GATEWAY_URL ({r.text[:80]})"
@@ -499,11 +529,11 @@ class Run:
             with contextlib.suppress(Exception):
                 cli.revoke_mandate(self.state, idx)
         sa.minted.clear()
-        self.remove_principals()
-        print(
-            f"\ncleanup: revoked the {n} mandates this run minted, rejected requests left pending, "
-            f"removed {', '.join(EVAL_PRINCIPALS)} from principals.json and approvers.json"
-        )
+        removed = ""
+        if self.added:
+            self.remove_principals()
+            removed = f", removed {', '.join(EVAL_PRINCIPALS)} from principals.json and approvers.json"
+        print(f"\ncleanup: revoked the {n} mandates this run minted, rejected requests left pending{removed}")
 
     # ================================================== questions
 
@@ -863,13 +893,13 @@ class Run:
             reason="PARENT_REVOKED",
             no_result=True,
         )
-        # GAP probe: a helper with a brand-new key and no mandate gets a first one from the supervisor alone
-        fresh = self.key(7, "fresh helper")
-        r = self.call(fresh, "", "grants", "request", {"scope": [roster], "ttl": 600, "reason": "first mandate"})
+        # static GAP probe: no grants tool hands a narrowed grant to a key that holds no mandate yet
+        from gateway.lib.grants import GRANTS_TOOLS  # noqa: PLC0415
+
         self.report.add(
             7,
-            "a helper with a brand-new key gets a first mandate without the person",
-            [] if r.status == 200 else [f"{r.short()}: no route for a key that holds no mandate"],
+            "a helper with a brand-new key gets a first mandate without the person (static probe: a grants tool)",
+            [] if {"delegate", "hand_on"} & set(GRANTS_TOOLS) else [f"grants tools are {sorted(GRANTS_TOOLS)}"],
             gap=True,
         )
 
@@ -1034,10 +1064,10 @@ class Run:
         summary = (r.result or {}).get("summary", "")
         self.report.add(
             10,
-            "grants.self names the school by name and how long the access lasts",
+            "grants.self names the school by name and when the access ends",
             expect(r, status=200)
             + ([] if "Dunmore Community College" in summary else [f"no school name in {summary!r}"])
-            + ([] if "until" in summary or " for " in summary else [f"no duration in {summary!r}"]),
+            + ([] if "Valid until " in summary else [f"no expiry in {summary!r}"]),
         )
         r = self.request(
             k,
@@ -1153,26 +1183,36 @@ class Run:
             ([f"decisions changed: {unchanged}"] if unchanged else [])
             + ([] if len(alerts) == 1 else [f"{len(alerts)} ALERT_REFUSALS events"]),
         )
-        # P0004's alert id is per pupil per hour and it is touched by every run, so use a quiet pupil (design 8)
-        urn = random.choice(["SCH08", "SCH09", "SCH10", "SCH12"])  # noqa: S311
-        target = random.choice(self.current_pupils(urn))  # noqa: S311
-        jtis = [claims_of(self._finder)["jti"]]
+        # P0004's alert id is per pupil per hour and every run touches it, so use a quiet pupil (design 8),
+        # chosen from the data file so no finder mandate receives it first; retry if one was alerted this hour
+        found, tried = [], []
         for _ in range(3):
-            t = self.mint([{"server": PD, "tools": ["search"], "constraints": {"urn": [urn]}}], key=k)
-            jtis.append(claims_of(t)["jti"])
-            self.call(k, t, PD, "search", {"query": target, "urn": urn, "limit": 1})
-        found = [
-            e
-            for j in jtis
-            for e in self.events(j).get("verified", [])
-            if e.get("reason_code") == "ALERT_PUPIL_TARGETED" and e.get("pupil_id") == target
-        ]
+            urn, target = random.choice(quiet_pupils())  # noqa: S311
+            tried.append(target)
+            jtis = []
+            for _ in range(3):
+                t = self.mint([{"server": PD, "tools": ["search"], "constraints": {"urn": [urn]}}], key=k)
+                jtis.append(claims_of(t)["jti"])
+                self.call(k, t, PD, "search", {"query": target, "urn": urn, "limit": 1})
+            found = [
+                e
+                for j in jtis
+                for e in self.events(j).get("verified", [])
+                if e.get("reason_code") == "ALERT_PUPIL_TARGETED" and e.get("pupil_id") == target
+            ]
+            if found:
+                break
         self.report.add(
             11,
-            f"3 claim-less mandates receiving one pupil ({target}): ALERT_PUPIL_TARGETED in audit.events",
-            [] if found else ["no alert under this run's mandates (another mandate may have raised it this hour)"],
+            f"3 claim-less mandates receiving one pupil ({tried[-1]}): ALERT_PUPIL_TARGETED in audit.events",
+            [] if found else [f"no alert under this run's mandates for {tried}"],
         )
-        self.flood_case()
+        if not self.flood:
+            self.report.note(
+                11,
+                "forged-flood case (unverified-source ceiling) not run: it runs alone with --flood, against a "
+                "gateway started with a low GATEWAY_LIMIT_CEILINGS_UNVERIFIED_PER_SOURCE_PER_MINUTE",
+            )
 
     def flood_case(self):
         """Q11, opt-in: forged requests until the unverified-source ceiling answers 429."""
@@ -1201,12 +1241,6 @@ class Run:
                 status=429,
                 reason="RATE_LIMITED",
                 retry_after=True,
-            )
-        else:
-            self.report.note(
-                11,
-                "forged-flood case (unverified-source ceiling) skipped: pass --flood, against a "
-                "gateway started with a low GATEWAY_LIMIT_CEILINGS_UNVERIFIED_PER_SOURCE_PER_MINUTE",
             )
 
     def q12(self):
@@ -1474,21 +1508,16 @@ class Run:
         )
 
     def q16(self):
+        # the eval's own person (so forged traffic doesn't pile up in a real person's log); officer:jsmith is "another"
         k = self.key(16)
-        mine = self.mint(cli.DEFAULT_SCOPE, key=k, principal="officer:jsmith")
+        mine = self.mint(cli.DEFAULT_SCOPE, key=k)
         jti = claims_of(mine)["jti"]
         used = self.call(k, mine, PD, "search", {"query": "P0004", "urn": "SCH01"})
         forged = ".".join(mine.split(".")[:2]) + "." + base64.urlsafe_b64encode(b"\0" * 64).rstrip(b"=").decode()
         for _ in range(2):
             self.call(k, forged, PD, "search", {"query": "P0004", "urn": "SCH01"})
-        rk = self.key(16, "reader")
-        reader = self.mint(
-            [{"server": "audit", "tools": ["events", "saw"], "constraints": {"principal": ["officer:jsmith"]}}],
-            key=rk,
-            principal="officer:jsmith",
-            clearance=2,
-        )
-        r = self.call(rk, reader, "audit", "events", {"principal": "officer:jsmith", "jti": jti})
+        rk, reader = self.audit_reader()
+        r = self.call(rk, reader, "audit", "events", {"principal": EVAL_PERSON, "jti": jti})
         log = r.result or {}
         ev = [e for e in log.get("verified", []) if e.get("decision_id") == used.decision.get("decision_id")]
         self.report.add(
@@ -1509,36 +1538,41 @@ class Run:
         )
         self.check(
             16,
-            "another person's log: CONSTRAINT_VIOLATED",
-            self.call(rk, reader, "audit", "events", {"principal": "officer:priya"}),
+            "another person's log (officer:jsmith): CONSTRAINT_VIOLATED",
+            self.call(rk, reader, "audit", "events", {"principal": "officer:jsmith"}),
             status=403,
             reason="CONSTRAINT_VIOLATED",
             no_result=True,
         )
-        ops = self.mint(
-            [{"server": "audit", "tools": ["events"], "constraints": {"principal": ["officer:jsmith"]}}],
-            key=rk,
-            principal="officer:jsmith",
-        )
+        ops = self.mint([{"server": "audit", "tools": ["events"], "constraints": {"principal": [EVAL_PERSON]}}], key=rk)
         self.check(
             16,
             "an operational mandate (no clearance) reading the log: CLEARANCE_MISSING",
-            self.call(rk, ops, "audit", "events", {"principal": "officer:jsmith"}),
+            self.call(rk, ops, "audit", "events", {"principal": EVAL_PERSON}),
             status=403,
             reason="CLEARANCE_MISSING",
             no_result=True,
         )
 
     def run(self) -> int:
-        self.add_principals()
         try:
             self.preflight()
-            for q in range(17):
-                try:
-                    getattr(self, f"q{q}")()
-                except Exception as e:  # noqa: BLE001  (a broken case is a FAIL, not a crash)
-                    where = traceback.extract_tb(e.__traceback__)[-1]
-                    self.report.add(q, "question ran to the end", [f"{type(e).__name__}: {e} (line {where.lineno})"])
+            if self.flood:  # alone: once the ceiling trips, every unverified case after it would be RATE_LIMITED
+                self.flood_case()
+            else:
+                self.add_principals()
+                for q in range(17):
+                    self.current = q
+                    try:
+                        getattr(self, f"q{q}")()
+                    except Exception as e:  # noqa: BLE001  (a broken case is a FAIL, not a crash)
+                        where = traceback.extract_tb(e.__traceback__)[-1]
+                        self.report.add(
+                            q, "question ran to the end", [f"{type(e).__name__}: {e} (line {where.lineno})"]
+                        )
+                    n, problems = self.seen.get(q, [0, []])
+                    self.report.add(q, f"all {n} responses: a decision_id, no 500, no flag value", problems)
+                    self.current = None
         finally:
             self.cleanup()
         self.report.summary()
@@ -1554,7 +1588,7 @@ def main(argv: list[str] | None = None) -> None:
         "--flood",
         action="store_true",
         default=os.environ.get("EVAL_FLOOD") == "1",
-        help="also flood forged requests to hit the unverified-source ceiling (blocks this address ~60s)",
+        help="run only the forged-flood case (the unverified-source ceiling); blocks this address for about 60s",
     )
     a = p.parse_args(argv)
     run = Run(a.url, a.state, a.issuer_url, flood=a.flood)

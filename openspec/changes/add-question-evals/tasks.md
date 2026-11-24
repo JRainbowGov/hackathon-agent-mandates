@@ -26,6 +26,6 @@
 
 ## 5. Run and check
 
-- [ ] 5.1 Run `make eval_questions` against :8082 with no FAIL. Fix any expectation the code contradicts, and record each change in the run notes
-- [ ] 5.2 `make eval_run` is unchanged at 32/32; `make test`, `make format` and `make lint` pass
-- [ ] 5.3 Gateway container rebuild: not applicable. This change edits no gateway code, and the shared stack on :8082 must not be rebuilt by this session
+- [x] 5.1 Run `make eval_questions` against :8082 with no FAIL. Fix any expectation the code contradicts, and record each change in the run notes
+- [x] 5.2 `make eval_run` is unchanged at 32/32; `make test`, `make format` and `make lint` pass
+- [x] 5.3 Gateway container rebuild: not applicable. This change edits no gateway code, and the shared stack on :8082 must not be rebuilt by this session
