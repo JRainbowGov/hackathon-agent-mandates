@@ -46,6 +46,32 @@ WIDER_WOULD_HELP = {
     "OUT_OF_SCOPE", "CONSTRAINT_VIOLATED", "CONSTRAINT_MISSING", "CLEARANCE_TOO_LOW", "AUDIENCE_VIOLATED",
 }  # fmt: skip
 MAX_WAIT = 300
+# what to do when asking for more, or waiting, is itself refused: the agent must stop, not guess
+REFUSED_NEXT = {
+    "EXCEEDS_PRINCIPAL": (
+        "The person can't grant this: it goes beyond what they may hold themselves. Don't ask again. Tell the person "
+        "what you needed and why; it has to come from someone who holds it, or their own access has to change."
+    ),
+    "REQUEST_INVALID": "The request isn't a valid grant (see detail). Fix it, usually by copying check_access's "
+    "missing.scope exactly, and ask again.",
+    "TOO_MANY_REQUESTS": "Too many requests are pending or were made recently. Wait for the person to decide the "
+    "pending ones (await_approval) before asking again.",
+    "RECENTLY_REJECTED": "The person rejected this same request recently. Don't ask again; tell them what you "
+    "would have done with it and let them decide.",
+    "DENIED_BY_RULE": "Your mandate forbids asking for more access. Tell the person what you needed.",
+    "CLEARANCE_MISSING": "Your mandate has no clearance, so it can't ask for more access. The person has to issue "
+    "you a mandate with a clearance.",
+    "OUT_OF_SCOPE": "That request belongs to another mandate. Use the request_id request_scopes returned to you.",
+    "ISSUER_UNAVAILABLE": "The approval service is down. Try again in a minute; nothing was asked.",
+}
+DEFAULT_REFUSED_NEXT = "Asking was refused (see reason_code and detail). Tell the person; don't retry the same request."
+
+
+def _refused(body: dict) -> dict:
+    decision = body.get("decision") or {}
+    code = decision.get("reason_code")
+    return {"status": "refused", "reason_code": code, "detail": decision.get("detail"), "decision": decision,
+            "next_step": REFUSED_NEXT.get(code, DEFAULT_REFUSED_NEXT)}  # fmt: skip
 
 
 def http_post(url: str) -> Post:
@@ -174,7 +200,7 @@ class Shim:
             arguments["clearance"] = clearance
         status, body = self._grants("request", arguments)
         if status != 200:  # noqa: PLR2004
-            return {"status": "refused", "decision": body.get("decision")}
+            return _refused(body)
         # already_granted may carry an earlier approval's mandate (add-run-reuse): kept, never shown
         return self._keep(body["result"])
 
@@ -183,7 +209,7 @@ class Shim:
         while True:
             status, body = self._grants("status", {"request_id": request_id})
             if status != 200:  # noqa: PLR2004
-                return {"status": "refused", "decision": body.get("decision")}
+                return _refused(body)
             view = body["result"]
             if view["status"] != "pending" or self._now() >= deadline:
                 break

@@ -819,3 +819,15 @@ def test_special_category_read_released_once(flow):
     assert "Ethnicity" in resp["result"]
     status, resp = f["call"](f["client"], child, "pupil-data", "pupil", **args)
     assert (status, resp["decision"]["reason_code"]) == (202, "SPECIAL_CATEGORY")
+
+
+def test_check_suggests_the_mandates_own_clearance_for_pupil_data(flow):
+    f = flow
+    token = f["mandate"](
+        [{"server": "pupil-data", "tools": ["search"], "constraints": {"urn": ["SCH04"]}}], clearance=2
+    )
+    check = {"server": "pupil-data", "tool": "search", "arguments": {"query": "P0011", "urn": "SCH02"}}
+    _, resp = f["call"](f["client"], token, "grants", "check", args=check)
+    missing = resp["result"]["missing"]
+    assert missing["clearance"] == 2  # not 4: that would hold every read
+    assert "lowest clearance" in missing["note"]

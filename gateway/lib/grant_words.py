@@ -20,12 +20,12 @@ SCHOOLS_PATH = Path(
 )
 
 TOOL_WORDS = {
-    ("pupil-data", "search"): "Search pupils' census records (including ethnicity and care status)",
+    ("pupil-data", "search"): "Search pupils' census records",
     ("pupil-data", "get"): "Read data files",
     ("pupil-data", "aggregate"): "Count pupils by group",
     ("pupil-data", "classification"): "Read the data sensitivity labels",
     ("pupil-data", "roster"): "List Year 10 and 11 pupils' IDs and names",
-    ("pupil-data", "pupil"): "Read pupils' full records (including ethnicity and care status)",
+    ("pupil-data", "pupil"): "Read pupils' records",
     ("pupil-data", "draft"): "Draft letters home",
     ("pupil-data", "write"): "Correct pupils' census records",
     ("schools", "list"): "List schools",
@@ -36,7 +36,16 @@ TOOL_WORDS = {
     ("audit", "events"): "Read the request log",
     ("audit", "saw"): "See what an agent received",
 }
-LEVEL_4_SERVERS = {"pupil-data", "special"}
+LEVEL_4_SERVERS = {"special"}  # always level 4; pupil-data only at clearance 4 (graded)
+# graded pupil-data (add-graded-pupil-data): what a read returns at each clearance, so the words never say more or less
+GRADED_SERVER = "pupil-data"
+GRADED_TOOLS = {"search", "pupil"}
+GRADED_WORDS = {
+    1: "with school and term only, no pupil details",
+    2: "with basic details only, not free school meals, language, ethnicity or care status",
+    3: "including free school meals and language, but not ethnicity or care status",
+    4: "including ethnicity and care status, each such read held for a person's approval",
+}
 # tools whose data belongs to a school: without a urn constraint they reach all twelve
 PER_SCHOOL_TOOLS = {"search", "aggregate", "roster", "pupil", "draft", "write", "name", "record"}
 
@@ -61,12 +70,20 @@ def _join(items: list[str]) -> str:
     return ", ".join(items[:-1]) + " and " + items[-1]
 
 
-def entry_words(entry: dict) -> str:
-    """One scope entry as a sentence fragment: what, where, for whom."""
+def _graded_level(clearance: int | None) -> int:
+    from .graded import claimless_level  # noqa: PLC0415  (graded imports audit; keep this module light)
+
+    return clearance if type(clearance) is int and 1 <= clearance <= 4 else claimless_level()  # noqa: PLR2004
+
+
+def entry_words(entry: dict, clearance: int | None = None) -> str:
+    """One scope entry as a sentence fragment: what, where, for whom. `clearance` is the grant's effective one."""
     server = entry.get("server", "?")
     tools = entry.get("tools", [])
     what = _join([TOOL_WORDS.get((server, t), f"Use {server}.{t}") for t in tools]) or f"Use {server}"
     parts = [what]
+    if server == GRADED_SERVER and set(tools) & GRADED_TOOLS:
+        parts.append(GRADED_WORDS[_graded_level(clearance)])
     constraints = entry.get("constraints", {})
     if urns := constraints.get("urn"):
         parts.append("at " + _join([school(str(u)) for u in urns]))
@@ -107,7 +124,7 @@ def lifetime(seconds: int) -> str:
 
 
 def grants_words(scope: list[dict], *, clearance: int | None = None, exp=None, ttl: int | None = None) -> str:
-    sentences = [entry_words(e) for e in scope]
+    sentences = [entry_words(e, clearance) for e in scope]
     text = ". ".join(sentences)
     if ttl:
         text += f", {lifetime(ttl)}"
@@ -119,8 +136,8 @@ def grants_words(scope: list[dict], *, clearance: int | None = None, exp=None, t
 
 
 def marks_level_4(scope: list[dict], clearance: int | None) -> bool:
-    """Whether a grant reaches special category data (level 4)."""
-    return any(e.get("server") in LEVEL_4_SERVERS for e in scope) or clearance == 4
+    """Whether a grant reaches special category data (level 4): the special server, or clearance 4."""
+    return any(e.get("server") in LEVEL_4_SERVERS for e in scope) or clearance == 4  # noqa: PLR2004
 
 
 def action_words(server: str, tool: str, arguments: dict) -> str:

@@ -24,6 +24,7 @@ from . import audit, safe_counts
 from .audience import audience_pupils
 from .common import canonical, sha256_hex
 from .grant_words import grants_words, until
+from .graded import GRADED_SERVER, claimless_level
 from .interfaces import SERVER_LEVELS
 from .scope_math import Invalid, already_granted, validate_entry, validate_request
 
@@ -120,14 +121,34 @@ def _self(claims: dict, revoked) -> Outcome:
     return Outcome(data=data)
 
 
-def _missing_grant(server: str, tool: str, arguments: dict, code: str, scope: list[dict], step: str | None) -> dict:
+GRADED_NOTE = (
+    "pupil-data works at any clearance and returns only the columns up to it: 2 basic details and names, 3 also free "
+    "school meals and language, 4 also ethnicity and care status, each such read held for a person's approval. Ask "
+    "for the lowest clearance the job needs."
+)
+
+
+def _suggested_clearance(server: str, claims: dict) -> int | None:
+    """The clearance to ask for. For graded pupil-data, the mandate's own (or 2): asking for the server's level, 4,
+    would make every read wait for special-category approval (add-graded-pupil-data)."""
+    level = SERVER_LEVELS.get(server)
+    if server == GRADED_SERVER:
+        current = claims.get("clearance")
+        return current if type(current) is int and 1 <= current <= 4 else claimless_level()  # noqa: PLR2004
+    return level
+
+
+def _missing_grant(server: str, tool: str, arguments: dict, code: str, scope: list[dict], step: str | None,
+                   claims: dict | None = None) -> dict:  # fmt: skip
     """The smallest scope entry that would let this call through."""
     pinned = {k: [arguments[k]] for k in ("urn", "path", "table", "measure") if k in arguments}
     entry: dict = {"server": server, "tools": [tool], "constraints": pinned}
     if code == "AUDIENCE_VIOLATED" or (code == "CONSTRAINT_VIOLATED" and "pupil_id" in arguments):
         named = [arguments["pupil_id"]] if "pupil_id" in arguments else list(arguments.get("pupil_ids") or [])
         entry["audience"] = {"pupils": [str(p) for p in named]}
-    missing = {"scope": [entry], "clearance": SERVER_LEVELS.get(server)}
+    missing = {"scope": [entry], "clearance": _suggested_clearance(server, claims or {})}
+    if server == GRADED_SERVER:
+        missing["note"] = GRADED_NOTE
     if step:
         missing["held"] = (
             "this call is held for approval; ask with grants.request and held={decision_id, server, tool, arguments}. "
@@ -151,7 +172,8 @@ def _check(claims: dict, arguments: dict, step_up: list[str]) -> Outcome:
     if decision == "STEP_UP" or code in {
         "OUT_OF_SCOPE", "CONSTRAINT_VIOLATED", "CONSTRAINT_MISSING", "CLEARANCE_TOO_LOW", "AUDIENCE_VIOLATED",
     }:  # fmt: skip
-        data["missing"] = _missing_grant(server, tool, args, code, claims["scope"], decision == "STEP_UP" or None)
+        data["missing"] = _missing_grant(server, tool, args, code, claims["scope"], decision == "STEP_UP" or None,
+                                         claims)  # fmt: skip
     return Outcome(data=data)
 
 

@@ -230,7 +230,9 @@ def create_request(body: CreateBody):
         tools = sorted({f"{c['server']}.{c['tool']}" for c in held})
         public_summary = f"Release {len(held)} held calls to {', '.join(tools)}"
     else:
-        summary = grants_words(scope, clearance=clearance, ttl=ttl)
+        # no clearance asked for: the minted mandate keeps the requester's, so describe that one
+        effective = clearance if clearance is not None else claims.get("clearance")
+        summary = grants_words(scope, clearance=effective, ttl=ttl)
         public_summary = summary  # argument values only after sign-in
     r = store().create(
         requester_jti=claims["jti"],
@@ -251,7 +253,7 @@ def create_request(body: CreateBody):
             "public_summary": public_summary,
             "parent_scope": claims.get("scope", []),
             "parent_budget": claims.get("budget"),  # run budgets: copied unchanged into what's minted
-            "level_4": marks_level_4(scope, clearance),
+            "level_4": marks_level_4(scope, clearance if clearance is not None else claims.get("clearance")),
         },
         request_key=request_key,
         held=held,
@@ -338,7 +340,9 @@ def summary_of(r: dict) -> str:
     approved = r.get("approved")
     if r["status"] != "approved" or not approved or r["held"]:
         return r["requested"]["summary"]
-    return grants_words(approved["scope"], clearance=approved.get("clearance"), ttl=approved.get("ttl"))
+    clearance = approved.get("clearance")
+    clearance = clearance if clearance is not None else r.get("parent_clearance")  # what the minted mandate carries
+    return grants_words(approved["scope"], clearance=clearance, ttl=approved.get("ttl"))
 
 
 def mint_for(r: dict, approved: dict, approved_by: dict, *, not_after: int | None = None) -> tuple[str, str]:

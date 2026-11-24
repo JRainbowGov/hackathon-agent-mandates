@@ -258,3 +258,19 @@ def test_mandates_stay_inside_the_shim(flow):
             "directory", "roster", SCH02_Y11)):  # fmt: skip
         assert base not in repr(result)
     assert jwt.decode(base, options={"verify_signature": False})["jti"] == shim.my_grants()["base"]["jti"]
+
+
+def test_asking_beyond_the_principal_says_what_to_do(flow):
+    f = flow
+    shim = shim_for(f, f["mandate"](roster("SCH04"), clearance=2))
+    asked = shim.request_scopes(scope=roster("SCH09"), reason="letters")
+    assert (asked["status"], asked["reason_code"]) == ("refused", "EXCEEDS_PRINCIPAL")
+    assert "Don't ask again" in asked["next_step"]
+
+
+def test_an_unknown_refusal_still_has_a_next_step(flow):
+    f = flow
+    shim = shim_for(f, f["mandate"](roster("SCH04"), clearance=2))
+    waited = shim.await_approval("urn:uuid:not-a-request", timeout_s=0)
+    assert waited["status"] == "refused"
+    assert waited["next_step"]
