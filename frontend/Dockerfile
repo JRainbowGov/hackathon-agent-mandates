@@ -13,6 +13,9 @@ FROM base AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY frontend .
+# path prefix the UI is served under, e.g. /frontend; fixed at build time (src/lib/paths.ts)
+ARG PUBLIC_BASE_PATH=
+ENV PUBLIC_BASE_PATH=${PUBLIC_BASE_PATH}
 RUN npm run build
 
 # Production image, copy all the files and run

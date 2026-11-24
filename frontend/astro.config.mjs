@@ -8,8 +8,12 @@ import { fileURLToPath } from 'node:url';
 import svelte from '@astrojs/svelte';
 const port = 4321;
 
+/* Served under a path prefix when PUBLIC_BASE_PATH is set at build time, e.g. /frontend (src/lib/paths.ts) */
+const base = process.env.PUBLIC_BASE_PATH || '/';
+
 // https://astro.build/config
 export default defineConfig({
+  base,
   server: { port: port, host: true },
   adapter: node({
     mode: 'standalone',

@@ -2,6 +2,7 @@
   // The approval page for one scope request (OpenSpec add-scope-requests). Everything a person reads comes from
   // the issuer's view: the summary is generated from the structured request, and the agent's own reason is shown
   // as plain text under its own label. The page decides nothing; the issuer checks the approver session.
+  import { withBase } from '../lib/paths';
   type Entry = { server: string; tools: string[]; constraints?: Record<string, unknown[]>; audience?: { pupils: string[] } };
   type View = {
     request_id: string;
@@ -41,7 +42,7 @@
   async function load() {
     loadError = '';
     try {
-      const res = await fetch(`/api/approve/view/${encodeURIComponent(requestId)}`);
+      const res = await fetch(withBase(`/api/approve/view/${encodeURIComponent(requestId)}`));
       const body = await res.json();
       if (!res.ok) throw new Error(body.detail ?? res.statusText);
       view = body;
@@ -74,7 +75,7 @@
     }
     busy = true;
     try {
-      const res = await fetch(`/api/approve/decision/${encodeURIComponent(requestId)}`, {
+      const res = await fetch(withBase(`/api/approve/decision/${encodeURIComponent(requestId)}`), {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ decision, number: chosen, approved: decision === 'approve' ? narrowed() : null }),

@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import { AuthReasons, type UserAuthorisationResult } from '@i-dot-ai-npm/utilities-auth';
 import { parseAuthToken } from './auth';
+import { stripBase, withBase } from './lib/paths';
 
 interface RedirectContext {
   redirect: (path: string) => Response;
@@ -29,7 +30,8 @@ const PUBLIC_PATHS = [
 ];
 
 export async function onRequest(context: RequestContext, next: () => Promise<Response>): Promise<Response> {
-  const pathname: string = new URL(context.request.url).pathname;
+  // matched without the path prefix, so the same list works with or without one (src/lib/paths.ts)
+  const pathname: string = stripBase(new URL(context.request.url).pathname);
 
   // Check if the requested path is public
   if (PUBLIC_PATHS.some((path: string) => pathname.startsWith(path))) {
@@ -82,13 +84,13 @@ export async function onRequest(context: RequestContext, next: () => Promise<Res
 }
 
 function redirectToUnauthorised(context: RedirectContext): Response {
-  return context.redirect('/unauthorised');
+  return context.redirect(withBase('/unauthorised'));
 }
 
 function redirectToSignOut(context: RedirectContext): Response {
-  return context.redirect('/sign-out');
+  return context.redirect(withBase('/sign-out'));
 }
 
 function redirectToGenericError(context) {
-  return context.redirect('/generic-error');
+  return context.redirect(withBase('/generic-error'));
 }
