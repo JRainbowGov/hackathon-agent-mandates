@@ -12,7 +12,7 @@ An agent that finds its mandate too narrow has no way to ask for more. A held ca
 - **Scope requests.** An agent asks for a structured grant with a reason and a lifetime. The gateway:
   - refuses the request if the mandate already covers it;
   - refuses it if it goes beyond what the person behind the mandate may hold;
-  - otherwise creates a pending request with an ID, an approval URL, a short user code, a challenge for a supervising agent, and an expiry.
+  - otherwise creates a pending request with an ID, an approval URL, a two-digit number for the person to choose on the approval page (one of three shown), a challenge for a supervising agent, and an expiry.
 - **Approval by a person or a supervising agent.**
   - **A person** approves on an approval page in the team's UI (`frontend/`, which organisers approved us changing on 23 Nov). The page shows a description the gateway generates from the structured request, and the agent's reason labelled as the agent's own words. The page holds no authority: the approval must be authenticated by the person's approver key, and the issuer verifies it. Holding the URL is not enough.
   - **A supervising agent** can approve only what its own mandate covers, and only if that mandate allows delegation. Anything wider goes to the person.

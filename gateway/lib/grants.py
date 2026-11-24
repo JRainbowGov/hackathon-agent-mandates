@@ -158,12 +158,14 @@ def _check(claims: dict, arguments: dict, step_up: list[str]) -> Outcome:
 def _with_next(view: dict) -> dict:
     status = view.get("status", "pending")
     view["next_action"] = NEXT_ACTION.get(status, "wait")
+    if view.get("reason_code") == "NUMBER_MISMATCH":  # a wrong pick on the page, not a person saying no
+        view["next_action"] = "request_again"
     view["poll_after_s"] = 10 if status == "pending" else None
     if status == "pending":
         view["text"] = (
-            f"Approval needed (code {view['user_code']}): {view['summary']}\n"
-            f"Open {view['approval_url']} and sign in with your approver key. Check the page shows code "
-            f"{view['user_code']}. This request expires at {until(view['expires_at']).removeprefix('until ')}.\n"
+            f"Approval needed: {view['summary']}\n"
+            f"Open {view['approval_url']}, sign in with your approver key, and choose {view['number']} on the "
+            f"approval page. This request expires at {until(view['expires_at']).removeprefix('until ')}.\n"
             'Replying "yes" here does not approve it.'
         )
     return view

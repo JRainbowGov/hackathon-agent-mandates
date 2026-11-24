@@ -12,7 +12,6 @@ import time
 import uuid
 from pathlib import Path
 
-USER_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTVWXYZ23456789"  # no 0/O, 1/I/L, U/V look-alikes
 REQUEST_TTL = 15 * 60
 MAX_PENDING = 3
 MAX_PER_HOUR = 10
@@ -34,11 +33,13 @@ CREATE TABLE IF NOT EXISTS requests (
     request_key TEXT NOT NULL,
     held TEXT,
     reason TEXT NOT NULL,
-    user_code TEXT NOT NULL,
+    match_number INTEGER NOT NULL,
+    match_options TEXT NOT NULL,
     ref_decision_id TEXT,
     created INTEGER NOT NULL,
     expires INTEGER NOT NULL,
     status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected', 'expired')),
+    end_reason TEXT,
     decided_by TEXT,
     decided_at INTEGER,
     approved TEXT,
@@ -57,16 +58,34 @@ CREATE TABLE IF NOT EXISTS outbox (
 );
 """
 
-JSON_FIELDS = ("cnf_jwk", "parent_status", "deny", "requested", "held", "decided_by", "approved")
+JSON_FIELDS = ("cnf_jwk", "parent_status", "deny", "requested", "held", "decided_by", "approved", "match_options")
+NUMBER_MISMATCH = "NUMBER_MISMATCH"  # end_reason of a request ended by a wrong pick (not a person saying no)
 
 
 class AlreadyDecided(Exception):
     pass
 
 
-def user_code() -> str:
-    raw = "".join(secrets.choice(USER_CODE_ALPHABET) for _ in range(8))
-    return f"{raw[:4]}-{raw[4:]}"
+def number_match() -> tuple[int, list[int]]:
+    """The number the agent tells the person to choose, and the three options the page shows in a fixed,
+    shuffled order: that number and two distinct decoys, all two-digit."""
+    rng = secrets.SystemRandom()
+    options = rng.sample(range(10, 100), 3)
+    return options[0], rng.sample(options, 3)
+
+
+def _migrate(db: sqlite3.Connection) -> None:
+    """Requests tables from before number matching had a `user_code` column instead of `match_number` and
+    `match_options`. Swap the columns in place; old requests can't be approved by number, so pending ones end
+    as expired (they'd have expired within 15 minutes anyway)."""
+    cols = {r[1] for r in db.execute("PRAGMA table_info(requests)")}
+    if "user_code" not in cols:
+        return
+    db.execute("UPDATE requests SET status = 'expired', decided_at = ? WHERE status = 'pending'", (int(time.time()),))
+    db.execute("ALTER TABLE requests DROP COLUMN user_code")
+    db.execute("ALTER TABLE requests ADD COLUMN match_number INTEGER")
+    db.execute("ALTER TABLE requests ADD COLUMN match_options TEXT")
+    db.execute("ALTER TABLE requests ADD COLUMN end_reason TEXT")
 
 
 class Store:
@@ -78,6 +97,7 @@ class Store:
         self._db.row_factory = sqlite3.Row
         self._lock = threading.Lock()
         self._db.executescript(SCHEMA)
+        _migrate(self._db)
 
     # ------------------------------------------------------------ helpers
 
@@ -115,17 +135,19 @@ class Store:
         pending = self._exec(q + " AND status = 'pending'", (requester_jti,)).fetchone()[0]
         last_hour = self._exec(q + " AND created >= ?", (requester_jti, now - 3600)).fetchone()[0]
         rejected = self._exec(
-            q + " AND status = 'rejected' AND request_key = ? AND decided_at >= ?",
-            (requester_jti, request_key, now - 3600),
+            q + " AND status = 'rejected' AND end_reason IS NOT ? AND request_key = ? AND decided_at >= ?",
+            (requester_jti, NUMBER_MISMATCH, request_key, now - 3600),
         ).fetchone()[0]
         return {"pending": pending, "last_hour": last_hour, "recently_rejected": rejected}
 
     def create(self, **fields) -> dict:
         now = int(time.time())
         rid = "sr_" + secrets.token_urlsafe(9)
+        number, options = number_match()
         row = {
             "id": rid,
-            "user_code": user_code(),
+            "match_number": number,
+            "match_options": options,
             "created": now,
             "expires": now + REQUEST_TTL,
             "status": "pending",
@@ -178,14 +200,16 @@ class Store:
             self.enqueue({"event_type": "approval_expired", "request": r, "reason_code": "EXPIRED"})
         return expired
 
-    def decide(self, rid: str, status: str, decided_by: dict, approved: dict | None = None) -> dict:
+    def decide(
+        self, rid: str, status: str, decided_by: dict, approved: dict | None = None, end_reason: str | None = None
+    ) -> dict:
         """The one decision a request gets. Raises AlreadyDecided if it is no longer pending."""
         now = int(time.time())
         self.expire_due(now)
         cur = self._exec(
-            "UPDATE requests SET status = ?, decided_by = ?, decided_at = ?, approved = ? "
+            "UPDATE requests SET status = ?, decided_by = ?, decided_at = ?, approved = ?, end_reason = ? "
             "WHERE id = ? AND status = 'pending'",
-            (status, json.dumps(decided_by), now, json.dumps(approved) if approved else None, rid),
+            (status, json.dumps(decided_by), now, json.dumps(approved) if approved else None, end_reason, rid),
         )
         if cur.rowcount != 1:
             raise AlreadyDecided(rid)

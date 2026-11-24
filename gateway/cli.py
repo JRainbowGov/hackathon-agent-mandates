@@ -264,9 +264,11 @@ def cmd_approver_login(a) -> None:
 
 def cmd_approve(a) -> None:
     decision = "reject" if a.reject else "approve"
+    if decision == "approve" and a.number is None:
+        sys.exit("approving needs --number: the number the agent told you to choose")
     approved = json.loads(a.approved) if a.approved else None
     signed = decision_token(priv_from_pem(a.approver_key.read_bytes()), a.principal, a.request_id, decision, approved)
-    body = {"decision": decision, "user_code": a.user_code, "approved": approved, "signed": signed}
+    body = {"decision": decision, "number": a.number, "approved": approved, "signed": signed}
     req = urllib.request.Request(  # noqa: S310
         f"{a.url}/requests/{a.request_id}/decision",
         data=json.dumps(body).encode(),
@@ -456,7 +458,9 @@ def main(argv: list[str] | None = None) -> None:  # noqa: PLR0915  (one parser p
     s.add_argument("request_id")
     s.add_argument("--principal", required=True)
     s.add_argument("--approver-key", type=Path, required=True)
-    s.add_argument("--user-code", required=True, help="the code the agent showed you; it must match the request")
+    s.add_argument(
+        "--number", type=int, help="the number the agent told you to choose (needed to approve); a wrong one ends it"
+    )
     s.add_argument("--reject", action="store_true")
     s.add_argument("--approved", help="approve less than asked: JSON {scope, clearance, ttl}")
     s.add_argument("--url", default=os.environ.get("ISSUER_URL", "http://localhost:8083"), help="issuer address")
