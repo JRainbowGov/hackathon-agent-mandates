@@ -205,7 +205,9 @@ async def _request(claims: dict, body: dict, decision_id: str) -> Outcome:
     except IssuerRefused as e:
         return refused(e.code, e.detail)
     if view.get("status") == "already_granted":
-        return Outcome(data={"status": "already_granted", "next_action": "retry"})
+        # reused from an earlier approval in this run (add-run-reuse): the agent gets that mandate back
+        reused = {k: view[k] for k in ("mandate", "mandate_jti", "reused_request_id") if k in view}
+        return Outcome(data={"status": "already_granted", "next_action": "retry", **reused})
     return Outcome(data=_with_next(view))
 
 

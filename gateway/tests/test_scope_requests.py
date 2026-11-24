@@ -523,3 +523,109 @@ def test_minted_mandate_shares_the_parents_budget_and_rate(flow):
     by_urn = {e["constraints"]["urn"][0]: e for e in claims["scope"]}
     assert by_urn["SCH02"]["rate"] == {"per_minute": 5, "max_calls": 50}  # narrows a parent entry: keeps its rate
     assert "rate" not in by_urn["SCH01"]  # new access: no parent entry to inherit from
+
+
+# ---------------------------------------------------------------- reuse within a run (add-run-reuse)
+
+
+def _approve(f, parent, scope, clearance=None):
+    args = {"scope": scope} | ({"clearance": clearance} if clearance else {})
+    v = f["request"](parent, **args)[1]["result"]
+    assert v["status"] == "pending", v
+    f["decide"](v["request_id"], v["user_code"], session=f["login"]())
+    minted = f["call"](f["client"], parent, "grants", "status", request_id=v["request_id"])[1]["result"]["mandate"]
+    return v["request_id"], minted
+
+
+def _pending(f, parent):
+    return f["call"](f["client"], parent, "grants", "self")[1]["result"]["pending_requests"]
+
+
+def test_asking_again_in_the_run_reuses_the_approval(flow):
+    f = flow
+    parent = f["mandate"](roster("SCH04"), clearance=2)
+    rid, minted = _approve(f, parent, roster("SCH02"))
+    requested_before = [e for e in events(jti_of(parent)) if e["event_type"] == "approval_requested"]
+
+    status, resp = f["request"](parent, scope=roster("SCH02"))  # the agent restarted and lost the mandate
+    result = resp["result"]
+    assert status == 200
+    assert (result["status"], result["next_action"]) == ("already_granted", "retry")
+    assert (result["mandate"], result["mandate_jti"], result["reused_request_id"]) == (minted, jti_of(minted), rid)
+    assert _pending(f, parent) == []
+    requested_after = [e for e in events(jti_of(parent)) if e["event_type"] == "approval_requested"]
+    assert len(requested_after) == len(requested_before)  # the person wasn't asked again
+    assert f["call"](f["client"], result["mandate"], "directory", "roster", **SCH02_Y11)[0] == 200
+
+
+def test_a_narrower_ask_is_covered_by_the_earlier_approval(flow):
+    f = flow
+    parent = f["mandate"](roster("SCH04"), clearance=2)
+    wide = [{"server": "directory", "tools": ["roster"], "constraints": {"urn": ["SCH02", "SCH03"]}}]
+    rid, minted = _approve(f, parent, wide)
+    result = f["request"](parent, scope=roster("SCH02"))[1]["result"]
+    assert (result["status"], result["reused_request_id"], result["mandate"]) == ("already_granted", rid, minted)
+
+
+def test_a_wider_ask_or_higher_clearance_still_asks(flow):
+    f = flow
+    parent = f["mandate"](roster("SCH04"), clearance=2)
+    _approve(f, parent, roster("SCH02"))
+    wider = [{"server": "directory", "tools": ["roster"], "constraints": {"urn": ["SCH02", "SCH03"]}}]
+    assert f["request"](parent, scope=wider)[1]["result"]["status"] == "pending"
+    higher = f["request"](parent, scope=roster("SCH02"), clearance=4)[1]["result"]
+    assert higher["status"] == "pending"
+
+
+def test_a_revoked_approval_is_not_reused(flow):
+    f = flow
+    parent = f["mandate"](roster("SCH04"), clearance=2)
+    _, minted = _approve(f, parent, roster("SCH02"))
+    idx = jwt.decode(minted, options={"verify_signature": False})["status"]["status_list"]["idx"]
+    cli.revoke_mandate(f["state"], idx)
+    result = f["request"](parent, scope=roster("SCH02"))[1]["result"]
+    assert result["status"] == "pending"
+
+
+def test_a_new_run_asks_again(flow):
+    f = flow
+    first = f["mandate"](roster("SCH04"), clearance=2)
+    _approve(f, first, roster("SCH02"))
+    second = f["mandate"](roster("SCH04"), clearance=2)  # the next job: a new base mandate, same agent key
+    assert f["request"](second, scope=roster("SCH02"))[1]["result"]["status"] == "pending"
+
+
+def test_a_released_held_call_is_not_reused(flow, tmp_path, monkeypatch):
+    f = flow
+    from mcp_server.api import routes_mcp  # noqa: PLC0415
+
+    monkeypatch.setattr(routes_mcp, "WRITES_PATH", tmp_path / "corrections.jsonl")
+    token, did = _held(f)
+    held = {"decision_id": did, "server": "pupil-data", "tool": "write", "arguments": WRITE}
+    v = f["request"](token, held=held)[1]["result"]
+    f["decide"](v["request_id"], v["user_code"], session=f["login"]())
+    again = f["request"](token, held=held)[1]["result"]
+    assert again["status"] == "pending"
+    assert again["request_id"] != v["request_id"]
+
+
+def test_run_wallet_keeps_approvals_across_a_restart(flow, tmp_path):
+    from examples.mandate_wallet import RunWallet  # noqa: PLC0415
+
+    f = flow
+    parent = f["mandate"](roster("SCH04"), clearance=2)
+    _, minted = _approve(f, parent, roster("SCH02"))
+    wallet = RunWallet.load(tmp_path / "run_wallet.json", parent)
+    assert wallet.pick("directory", "roster", SCH02_Y11) == parent  # nothing held yet: the base mandate
+    assert wallet.absorb({"status": "approved", "mandate": minted})
+    wallet.save()
+
+    restarted = RunWallet.load(tmp_path / "run_wallet.json", parent)  # the agent restarts
+    chosen = restarted.pick("directory", "roster", SCH02_Y11)
+    assert chosen == minted
+    assert f["call"](f["client"], chosen, "directory", "roster", **SCH02_Y11)[0] == 200
+    assert restarted.pick("directory", "roster", SCH04_Y11) == parent  # the base covers its own school
+
+    other_run = RunWallet.load(tmp_path / "run_wallet.json", f["mandate"](roster("SCH04"), clearance=2))
+    assert other_run.valid() == []  # a new base mandate starts empty
+    assert not other_run.add(minted)  # and won't take another run's mandate

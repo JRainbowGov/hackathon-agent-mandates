@@ -54,6 +54,7 @@ FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:8081").rstrip("/
 GATEWAY_INTERNAL_URL = os.environ.get("GATEWAY_INTERNAL_URL", "http://gateway:8082").rstrip("/")
 REQUEST_WINDOW = 300  # seconds a signed call stays fresh, as at the gateway
 HELD_TTL = 300  # a mandate that releases one held call lives at most 5 minutes
+REUSE_MIN_REMAINING_S = 60  # an earlier approval about to expire is not handed back; asking again is clearer
 LOGIN_MAX_AGE = 300
 LOGIN_TYP = "approver-login+jwt"
 DECISION_TYP = "approver-decision+jwt"
@@ -170,6 +171,9 @@ def create_request(body: CreateBody):
         raise Refused("REQUEST_INVALID", str(e)) from e
     if not held and already_granted(claims, scope, clearance):
         return {"status": "already_granted"}
+    # an earlier approval in this run that still holds covers it: hand that back instead of asking again
+    if not held and (earlier := _reusable_approval(claims["jti"], scope, clearance)):
+        return earlier
     principal = (claims.get("delegator") or {}).get("principal", "")
     if over := within_ceiling(_json_file("principals.json").get(principal), scope, clearance):
         raise Refused("EXCEEDS_PRINCIPAL", over)
@@ -219,6 +223,32 @@ def create_request(body: CreateBody):
     store().enqueue({"event_type": "approval_requested", "request": r, "reason_code": "REQUESTED"})
     flush_events()
     return agent_view(r)
+
+
+def _reusable_approval(requester_jti: str, scope: list[dict], clearance: int | None) -> dict | None:
+    """The newest approval in this run (same base mandate) whose minted mandate still verifies and covers the ask.
+
+    Held-call releases are never reused: they pre-approve one exact action once. The minted mandate is verified
+    again (signature, expiry, its own revocation and its parent's), so a revoked or expired approval asks afresh.
+    """
+    registry = TrustedList(_json_file("trusted_list.json"))
+    meta = _json_file("status_list.json")
+    status_jwt = (STATE_DIR / "status_list.jwt").read_text().strip()
+    for r in store().approved_for(requester_jti):
+        try:
+            minted = verify_mandate(r["minted"], registry, {meta["uri"]: status_jwt})
+        except Reject:
+            continue
+        if minted["exp"] - time.time() < REUSE_MIN_REMAINING_S:
+            continue
+        if already_granted(minted, scope, clearance):
+            return {
+                "status": "already_granted",
+                "mandate": r["minted"],
+                "mandate_jti": r["minted_jti"],
+                "reused_request_id": r["id"],
+            }
+    return None
 
 
 @app.get("/internal/requests")
