@@ -123,9 +123,12 @@ minutes. Different arguments, or a second try, are held again.
 ## From Claude Code: the MCP shim
 
 `gateway/shim.py` is a local MCP server that holds the agent key and the mandates, so the agent never handles
-either. It offers `call`, `my_grants`, `check_access`, `request_scopes` and `await_approval`. `call` tries the base
-mandate first, then any approved mandate still in date. A refusal says what to do next, and a held call comes back
-with the `held` object `request_scopes` needs. Give it a mandate with `clearance` (`dunmore.jwt` above):
+either. It offers `call`, `my_grants`, `check_access`, `request_scopes` and `await_approval`. `call` uses the
+narrowest mandate that covers the call and falls back to the base mandate. A refusal says what to do next, and a
+held call comes back with the `held` object `request_scopes` needs. `held` may also be a list, released by one
+approval. Any mandate in a result, whether newly approved or an earlier approval reused within the run, goes into
+the shim's run wallet (`examples/mandate_wallet.py`) and is taken out of what the agent sees. Give it a mandate
+with `clearance` (`dunmore.jwt` above):
 
 ```bash
 claude mcp add mandates -e SHIM_AGENT_KEY=$PWD/gateway/state/agent.pem -e SHIM_MANDATE=$PWD/dunmore.jwt \
@@ -135,7 +138,8 @@ claude mcp add mandates -e SHIM_AGENT_KEY=$PWD/gateway/state/agent.pem -e SHIM_M
 Then ask Claude Code for Brookmere's Year 11 roster. It's refused, `check_access` names the missing grant, and
 `request_scopes` returns the text to show you. Approve it with `cli approve` or on the page, and `await_approval`
 picks up the new mandate. The retry goes through. `SHIM_GATEWAY_URL` points it at another gateway (default
-`http://localhost:8082`). Approved mandates live in the shim's memory, so restarting it drops them.
+`http://localhost:8082`). The wallet is saved next to the base mandate (`dunmore.wallet.json`, or `SHIM_WALLET`), so
+a restarted shim keeps its approvals. A wallet file from a different base mandate is ignored.
 
 ## A supervising agent
 

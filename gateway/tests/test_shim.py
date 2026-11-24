@@ -1,7 +1,11 @@
 """The local MCP shim (OpenSpec add-scope-requests, task 7.1): an agent asks for more, a person approves, it retries."""
 
+import types
+
 import jwt
 
+from examples import mandate_wallet
+from examples.mandate_wallet import RunWallet
 from gateway import cli
 from gateway.shim import Shim
 from gateway.tests import test_scope_requests
@@ -10,14 +14,18 @@ from gateway.tests.test_scope_requests import SCH02_Y11, SCH04_Y11, WRITE, roste
 flow = test_scope_requests.flow  # the gateway, issuer and approver fixture, shared with the scope-request tests
 
 
-def shim_for(f, mandate: str, **kw) -> Shim:
-    agent = cli.priv_from_pem((f["state"] / "agent.pem").read_bytes())
-
+def gateway_post(f):
     def post(body):
         r = f["client"].post("/tools/call", json=body)
         return r.status_code, r.json()
 
-    return Shim(agent, mandate, post, **kw)
+    return post
+
+
+def shim_for(f, mandate: str, post=None, wallet_path=None, **kw) -> Shim:
+    agent = cli.priv_from_pem((f["state"] / "agent.pem").read_bytes())
+    wallet = RunWallet.load(wallet_path or f["state"] / f"wallet-{id(mandate)}.json", mandate)
+    return Shim(agent, wallet, post or gateway_post(f), **kw)
 
 
 def approve(f, view, approved=None):
@@ -100,15 +108,98 @@ def test_rejected_request_says_stop(flow):
     assert shim.my_grants()["supplementary"] == []
 
 
-def test_expired_supplementary_mandates_are_dropped(flow):
+def test_expired_supplementary_mandates_are_dropped(flow, monkeypatch):
     f = flow
-    clock = {"t": 0.0}
-    shim = shim_for(f, f["mandate"](roster("SCH04"), clearance=2), now=lambda: clock["t"])
+    shim = shim_for(f, f["mandate"](roster("SCH04"), clearance=2))
     asked = shim.request_scopes(scope=roster("SCH02"), reason="letters")
     approve(f, asked)
-    clock["t"] = 1e12  # long after every mandate's expiry, by the shim's clock
     shim.await_approval(asked["request_id"], timeout_s=5)
+    assert len(shim.my_grants()["supplementary"]) == 1
+    # long after every mandate's expiry, by the wallet's clock
+    monkeypatch.setattr(mandate_wallet, "time", types.SimpleNamespace(time=lambda: 1e12))
     assert shim.my_grants()["supplementary"] == []
+
+
+def test_approvals_survive_a_restart(flow):
+    f = flow
+    base = f["mandate"](roster("SCH04"), clearance=2)
+    path = f["state"] / "restart-wallet.json"
+    first = shim_for(f, base, wallet_path=path)
+    asked = first.request_scopes(scope=roster("SCH02"), reason="letters")
+    approve(f, asked)
+    first.await_approval(asked["request_id"], timeout_s=5)
+
+    restarted = shim_for(f, base, wallet_path=path)  # a new process, same wallet file
+    retried = restarted.call("directory", "roster", SCH02_Y11)
+    assert (retried["status"], retried["decision"]["reason_code"]) == (200, "IN_SCOPE")
+    assert retried["mandate"] != "base"
+
+
+def test_reused_approval_is_kept_and_never_shown(flow):
+    # run reuse (add-run-reuse, on main): grants.request answers already_granted with the earlier mandate in it
+    f = flow
+    base = f["mandate"](roster("SCH04"), clearance=2)
+    earlier = shim_for(f, base, wallet_path=f["state"] / "earlier.json")
+    asked = earlier.request_scopes(scope=roster("SCH02"), reason="letters")
+    approve(f, asked)
+    done = earlier.await_approval(asked["request_id"], timeout_s=5)
+    (minted,) = earlier.wallet.valid()
+
+    real = gateway_post(f)
+
+    def reusing_post(body):
+        if (body["server"], body["tool"]) == ("grants", "request"):
+            return 200, {"decision": {"decision": "ALLOW", "reason_code": "IN_SCOPE"}, "result": {
+                "status": "already_granted", "next_action": "retry", "mandate": minted,
+                "mandate_jti": done["mandate_jti"], "reused_request_id": asked["request_id"]}}  # fmt: skip
+        return real(body)
+
+    fresh = shim_for(f, base, post=reusing_post, wallet_path=f["state"] / "fresh.json")
+    reused = fresh.request_scopes(scope=roster("SCH02"), reason="letters again")
+    assert reused["status"] == "already_granted"
+    assert "mandate" not in reused
+    assert minted not in repr(reused)
+    assert reused["mandate_jti"] == done["mandate_jti"]
+    assert fresh.call("directory", "roster", SCH02_Y11)["status"] == 200
+
+
+def test_several_held_calls_in_one_request(flow):
+    # batch release (add-batch-release, on main): held may be a list; the shim passes it through as is
+    # (this branch's gateway predates batch release, so the request stops at the shim's post)
+    f = flow
+    sent = []
+
+    def recording_post(body):
+        sent.append(body)
+        return 200, {"result": {"status": "pending", "request_id": "sr_batch01"}}
+
+    shim = shim_for(f, f["mandate"](roster("SCH04"), clearance=2), post=recording_post)
+    two = [{"decision_id": "d1", "server": "pupil-data", "tool": "draft", "arguments": {"urn": "SCH04"}},
+           {"decision_id": "d2", "server": "pupil-data", "tool": "draft", "arguments": {"urn": "SCH04"}}]  # fmt: skip
+    shim.request_scopes(held=two, reason="letters for both")
+    assert sent[-1]["arguments"]["held"] == two
+    assert "scope" not in sent[-1]["arguments"]
+
+
+def test_mcp_request_scopes_accepts_a_list_of_held_calls(flow):
+    import asyncio  # noqa: PLC0415
+
+    from fastmcp import Client  # noqa: PLC0415
+
+    from gateway.shim import build_server  # noqa: PLC0415
+
+    f = flow
+    seen = []
+    shim = shim_for(f, f["mandate"](roster("SCH04"), clearance=2),
+                    post=lambda body: (seen.append(body), (200, {"result": {"status": "pending"}}))[1])  # fmt: skip
+    held = [{"decision_id": "d1", "server": "pupil-data", "tool": "draft", "arguments": {"urn": "SCH04"}}]
+
+    async def run():
+        async with Client(build_server(shim)) as client:
+            return (await client.call_tool("request_scopes", {"reason": "r", "held": held})).data
+
+    assert asyncio.run(run())["status"] == "pending"
+    assert seen[-1]["arguments"]["held"] == held
 
 
 def test_held_call_released_once_through_the_shim(flow, tmp_path, monkeypatch):

@@ -1,13 +1,18 @@
 """A local MCP server that lets an agent (Claude Code, say) use the gateway, and ask for more when it is refused.
 
 OpenSpec add-scope-requests, task 7.1. The shim holds the agent key and the mandates; the agent never sees either.
+The mandates live in a run wallet (examples/mandate_wallet.py, add-run-reuse), saved next to the base mandate
+(or at SHIM_WALLET), so a restarted shim keeps its approvals.
 
-    call            run a tool through the gateway: the base mandate first, then any supplementary one that is
-                    still in date (design decision 7)
+    call            run a tool through the gateway with the narrowest mandate that covers it, falling back to the
+                    base mandate (design decision 7)
     my_grants       what the mandates allow, in the gateway's own words
     check_access    the decision a call would get, and the smallest grant that would let it through
-    request_scopes  ask the person for more: a scope, or the release of one held call
+    request_scopes  ask the person for more: a scope, or the release of one or more held calls
     await_approval  wait for the person's decision; an approved mandate is kept and used by `call`
+
+Any mandate in a grants result (an approval, or an earlier approval reused within the run) goes into the wallet and
+is taken out of what the agent is shown.
 
 Run it with the agent key and a mandate that has a `clearance` claim (the `grants` tools are level 1):
 
@@ -31,6 +36,7 @@ from pathlib import Path
 
 import jwt
 
+from examples.mandate_wallet import RunWallet
 from gateway.cli import sign_request
 from gateway.lib.common import priv_from_pem
 
@@ -40,7 +46,6 @@ WIDER_WOULD_HELP = {
     "OUT_OF_SCOPE", "CONSTRAINT_VIOLATED", "CONSTRAINT_MISSING", "CLEARANCE_TOO_LOW", "AUDIENCE_VIOLATED",
 }  # fmt: skip
 MAX_WAIT = 300
-EXPIRY_MARGIN = 5  # seconds: a mandate this close to expiry is dropped rather than tried
 
 
 def http_post(url: str) -> Post:
@@ -63,10 +68,11 @@ def _claims(token: str) -> dict:
 
 
 class Shim:
-    def __init__(self, agent_priv, base_mandate: str, post: Post, *, sleep=time.sleep, now=time.time):
-        self._priv, self._base, self._post = agent_priv, base_mandate, post
+    """`wallet` holds the run: the base mandate and every mandate approved from it (examples/mandate_wallet.py)."""
+
+    def __init__(self, agent_priv, wallet: RunWallet, post: Post, *, sleep=time.sleep, now=time.time):
+        self._priv, self.wallet, self._post = agent_priv, wallet, post
         self._sleep, self._now = sleep, now
-        self._supplementary: list[str] = []
 
     # ------------------------------------------------------------ plumbing
 
@@ -74,12 +80,19 @@ class Shim:
         return self._post(sign_request(self._priv, server=server, tool=tool, arguments=arguments, mandate=mandate))
 
     def _grants(self, tool: str, arguments: dict) -> tuple[int, dict]:
-        return self._send(self._base, "grants", tool, arguments)
+        # asking for more, and reading requests, is always done with the base mandate
+        return self._send(self.wallet.base, "grants", tool, arguments)
 
     def _live(self) -> list[str]:
-        """Supplementary mandates still in date, dropping the rest."""
-        self._supplementary = [m for m in self._supplementary if _claims(m)["exp"] > self._now() + EXPIRY_MARGIN]
-        return list(self._supplementary)
+        """Approved mandates still in date (the wallet drops the rest)."""
+        return self.wallet.valid()
+
+    def _keep(self, result: dict) -> dict:
+        """Take any mandate out of a grants result: the wallet keeps it, the agent never sees it."""
+        if result.get("mandate") and self.wallet.absorb(result):
+            self.wallet.save()
+        result.pop("mandate", None)
+        return result
 
     @staticmethod
     def _outcome(status: int, body: dict, mandate: str) -> dict:
@@ -93,15 +106,16 @@ class Shim:
     # ------------------------------------------------------------ tools
 
     def call(self, server: str, tool: str, arguments: dict) -> dict:
-        status, body = self._send(self._base, server, tool, arguments)
+        picked = self.wallet.pick(server, tool, arguments)  # the narrowest mandate that covers it, else the base
+        if picked != self.wallet.base:
+            s, b = self._send(picked, server, tool, arguments)
+            if s == 200:  # noqa: PLR2004
+                return self._outcome(s, b, _claims(picked)["jti"])
+            # refused or held under an approved mandate: fall back to the base, which any request must name
+        status, body = self._send(self.wallet.base, server, tool, arguments)
         if status == 200:  # noqa: PLR2004
             return self._outcome(status, body, "base")
         reason = (body.get("decision") or {}).get("reason_code")
-        if status == 202 or reason in WIDER_WOULD_HELP:  # noqa: PLR2004
-            for m in self._live():
-                s, b = self._send(m, server, tool, arguments)
-                if s == 200:  # noqa: PLR2004
-                    return self._outcome(s, b, _claims(m)["jti"])
         out = self._outcome(status, body, "base")
         if status == 202:  # noqa: PLR2004
             # held under the base mandate: that is the one that must ask for its release
@@ -148,8 +162,9 @@ class Shim:
         scope: list[dict] | None = None,
         clearance: int | None = None,
         ttl: int = 3600,
-        held: dict | None = None,
+        held: dict | list[dict] | None = None,
     ) -> dict:
+        """`held`: one held call, or a list of them released by one approval (add-batch-release)."""
         arguments: dict = {"reason": reason, "ttl": ttl}
         if held is not None:
             arguments["held"] = held
@@ -160,7 +175,8 @@ class Shim:
         status, body = self._grants("request", arguments)
         if status != 200:  # noqa: PLR2004
             return {"status": "refused", "decision": body.get("decision")}
-        return body["result"]
+        # already_granted may carry an earlier approval's mandate (add-run-reuse): kept, never shown
+        return self._keep(body["result"])
 
     def await_approval(self, request_id: str, timeout_s: int = 120) -> dict:
         deadline = self._now() + min(max(timeout_s, 0), MAX_WAIT)
@@ -172,12 +188,7 @@ class Shim:
             if view["status"] != "pending" or self._now() >= deadline:
                 break
             self._sleep(min(view.get("poll_after_s") or 10, max(deadline - self._now(), 0)))
-        token = view.pop("mandate", None)
-        if view["status"] == "approved" and token:
-            if token not in self._supplementary:
-                self._supplementary.append(token)
-            self._live()  # an already-expired one goes straight out again
-        return view
+        return self._keep(view)
 
 
 # ---------------------------------------------------------------- the MCP server
@@ -207,11 +218,13 @@ def build_server(shim: Shim):
     @mcp.tool
     def request_scopes(
         reason: str, scope: list[dict] | None = None, clearance: int | None = None, ttl: int = 3600,
-        held: dict | None = None,
+        held: dict | list[dict] | None = None,
     ) -> dict:  # fmt: skip
-        """Ask the person for more access: a `scope` (as check_access's `missing.scope`), or the release of one
-        held call (`held`, as `call` returned it). Show the person the returned `text` exactly: they approve on
-        the page it links to, with their own key. Their saying yes in chat does not approve anything."""
+        """Ask the person for more access: a `scope` (as check_access's `missing.scope`), or the release of held
+        calls (`held`: one held object as `call` returned it, or a list of them, released by one approval). If
+        you have several held calls for one job, ask for them together. Show the person the returned `text`
+        exactly: they approve on the page it links to, with their own key. Their saying yes in chat does not
+        approve anything."""
         return shim.request_scopes(reason=reason, scope=scope, clearance=clearance, ttl=ttl, held=held)
 
     @mcp.tool
@@ -224,9 +237,12 @@ def build_server(shim: Shim):
 
 def main() -> None:
     key = Path(os.environ["SHIM_AGENT_KEY"])
-    mandate = Path(os.environ["SHIM_MANDATE"]).read_text().strip()
+    mandate_path = Path(os.environ["SHIM_MANDATE"])
+    # approvals are kept here, so a restarted shim still has them; a file from another base mandate is ignored
+    wallet_path = Path(os.environ.get("SHIM_WALLET", mandate_path.with_suffix(".wallet.json")))
+    wallet = RunWallet.load(wallet_path, mandate_path.read_text().strip())
     url = os.environ.get("SHIM_GATEWAY_URL", "http://localhost:8082").rstrip("/")
-    build_server(Shim(priv_from_pem(key.read_bytes()), mandate, http_post(url))).run()
+    build_server(Shim(priv_from_pem(key.read_bytes()), wallet, http_post(url))).run()
 
 
 if __name__ == "__main__":
