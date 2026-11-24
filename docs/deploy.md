@@ -14,6 +14,11 @@ Only the gateway is public. Everything else stays on the Compose network or the 
 - it binds the UI to loopback;
 - it forces the `/demo` routes off.
 
+**Put TLS in front of the gateway.** `:8082` speaks plain HTTP. The request signature stops anyone changing a
+call, but not reading it: the mandate, the arguments and the pupil data in the response all cross the network in
+clear. On a shared network, terminate TLS in front of it (a reverse proxy, or the host's load balancer) and give
+other teams the `https://` address. Use that address for `DEPLOY_URL` and `audit anchor` below.
+
 ## Where the issuer key lives
 
 The issuer key (`gateway/state/issuer_key.pem`) signs every mandate and the revocation list. Anyone holding it can

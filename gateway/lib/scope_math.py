@@ -18,6 +18,8 @@ for _server, _tool in TOOL_WORDS:
 MAX_ENTRIES = 10
 MIN_TTL, MAX_TTL = 60, 86400
 MAX_REASON = 500
+MAX_ROWS = 100  # the gateway's own cap on rows a call (gateway_verify.MAX_ROWS)
+RATE_KEYS = {"per_minute", "max_calls"}
 
 
 class Invalid(ValueError):
@@ -43,14 +45,25 @@ def validate_entry(entry) -> None:
     if not isinstance(entry, dict):
         raise Invalid("each scope entry must be an object")
     server = entry.get("server")
-    if server not in REQUESTABLE:
+    if not isinstance(server, str) or server not in REQUESTABLE:
         raise Invalid(f"unknown server {server!r}")
     tools = entry.get("tools")
-    if not isinstance(tools, list) or not tools or not set(tools) <= KNOWN_TOOLS.get(server, set()):
+    if (
+        not isinstance(tools, list)
+        or not tools
+        or not all(isinstance(t, str) for t in tools)
+        or not set(tools) <= KNOWN_TOOLS.get(server, set())
+    ):
         raise Invalid(f"tools must be a non-empty list of {server} tools")
     constraints = entry.get("constraints", {})
-    if not isinstance(constraints, dict) or not all(isinstance(v, list) and v for v in constraints.values()):
-        raise Invalid("constraints must map argument names to non-empty lists")
+    if not isinstance(constraints, dict) or not all(
+        isinstance(v, list) and v and all(type(x) in (str, int) for x in v) for v in constraints.values()
+    ):
+        raise Invalid("constraints must map argument names to non-empty lists of strings or integers")
+    if "max_rows" in entry and not (type(entry["max_rows"]) is int and 0 <= entry["max_rows"] <= MAX_ROWS):
+        raise Invalid(f"max_rows must be an integer from 0 to {MAX_ROWS}")
+    if "rate" in entry:
+        validate_rate(entry["rate"])
     try:
         audience_pupils(entry)
     except ValueError as e:
@@ -58,6 +71,22 @@ def validate_entry(entry) -> None:
     extra = set(entry) - {"server", "tools", "constraints", "audience", "max_rows", "rate"}
     if extra:
         raise Invalid(f"unknown keys in a scope entry: {sorted(extra)}")
+
+
+def validate_rate(rate) -> None:
+    if not isinstance(rate, dict) or not rate or not set(rate) <= RATE_KEYS:
+        raise Invalid(f"rate must set one or both of {sorted(RATE_KEYS)}")
+    if not all(type(v) is int and v >= 1 for v in rate.values()):
+        raise Invalid("rate limits must be positive integers")
+
+
+def rate_within(wanted: dict | None, held: dict | None) -> bool:
+    """Whether rate `wanted` is at least as tight as `held`. A limit that isn't set is no limit."""
+    if not held:
+        return True
+    if not isinstance(wanted, dict):
+        return False
+    return all(type(wanted.get(k)) is int and wanted[k] <= v for k, v in held.items())
 
 
 def entry_covers(held: dict, wanted: dict) -> bool:
@@ -78,8 +107,13 @@ def entry_covers(held: dict, wanted: dict) -> bool:
     return wanted.get("max_rows", 100) <= held_rows
 
 
-def scope_covers(held_scope: list[dict], wanted_scope: list[dict]) -> bool:
-    return all(any(entry_covers(h, w) for h in held_scope) for w in wanted_scope)
+def scope_covers(held_scope: list[dict], wanted_scope: list[dict], *, rates: bool = False) -> bool:
+    """`rates`: also require each wanted entry's rate to be as tight as the entry that covers it. Off where a
+    wanted entry with no rate inherits the parent's at minting (already_granted)."""
+    return all(
+        any(entry_covers(h, w) and (not rates or rate_within(w.get("rate"), h.get("rate"))) for h in held_scope)
+        for w in wanted_scope
+    )
 
 
 def clearance_covers(held: int | None, wanted: int | None, wanted_scope: list[dict]) -> bool:
@@ -121,7 +155,14 @@ def within_ceiling(ceiling: dict | None, scope: list[dict], clearance: int | Non
 
 def narrower_or_equal(requested: dict, approved: dict) -> bool:
     """Whether an approved grant {scope, clearance, ttl} is a subset of the requested one."""
-    if not scope_covers(requested["scope"], approved["scope"]):
+    if not isinstance(approved.get("scope"), list) or not approved["scope"]:
+        return False
+    try:
+        for entry in approved["scope"]:
+            validate_entry(entry)
+    except Invalid:
+        return False
+    if not scope_covers(requested["scope"], approved["scope"], rates=True):
         return False
     if approved.get("ttl", 0) > requested.get("ttl", 0):
         return False

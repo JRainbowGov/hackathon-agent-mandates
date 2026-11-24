@@ -32,7 +32,7 @@ from pydantic import BaseModel
 from gateway.cli import _load_status, issue_mandate
 from gateway.lib.audit import sign_external_event
 from gateway.lib.common import canonical, jwk_to_pub, pub_to_pem, sha256_hex, verify_bytes
-from gateway.lib.gateway_verify import Reject, Request, verify_mandate
+from gateway.lib.gateway_verify import Reject, Request, denied_by, verify_mandate
 from gateway.lib.grant_words import action_words, grants_words, marks_level_4
 from gateway.lib.scope_math import (
     Invalid,
@@ -124,8 +124,8 @@ def verify_call(call: dict, tool: str) -> dict:
 
 
 def _held_scope(held: dict) -> list[dict]:
-    """The one-entry grant that covers a held call: its server and tool, pinned to its school and pupil."""
-    pinned = {k: [held["arguments"][k]] for k in ("urn", "pupil_id") if k in held["arguments"]}
+    """The one-entry grant that covers a held call: its server and tool, pinned to its school, pupil and file."""
+    pinned = {k: [held["arguments"][k]] for k in ("urn", "pupil_id", "path") if k in held["arguments"]}
     return [{"server": held["server"], "tools": [held["tool"]], "constraints": pinned}]
 
 
@@ -431,6 +431,21 @@ class SupervisorBody(BaseModel):
     call: dict
 
 
+def _beyond_supervisor(claims: dict, approved: dict) -> str | None:
+    """Why a supervising agent's mandate can't pass on `approved`, or None: its scope (rates included), its
+    clearance, and its own deny rules all bound what it delegates."""
+    if not (
+        scope_covers(claims.get("scope", []), approved["scope"], rates=True)
+        and clearance_covers(claims.get("clearance"), approved["clearance"], approved["scope"])
+    ):
+        return "the supervisor's own mandate doesn't cover this"
+    for entry in approved["scope"]:
+        for tool in entry["tools"]:
+            if pat := denied_by(f"{entry['server']}.{tool}", claims.get("deny", [])):
+                return f"the supervisor's own mandate denies {pat}"
+    return None
+
+
 @app.post("/internal/requests/{rid}/supervisor-decision")
 def supervisor_decision(rid: str, body: SupervisorBody):
     claims = verify_call(body.call, "decide")
@@ -456,11 +471,8 @@ def supervisor_decision(rid: str, body: SupervisorBody):
     if claims.get("agent_id") == r["requester_agent_id"]:
         refuse("SELF_APPROVAL", "an agent can't approve its own request")
     approved = _approved_grant(r, args.get("approved"))
-    if args.get("decision") == "approve" and not (
-        scope_covers(claims.get("scope", []), approved["scope"])
-        and clearance_covers(claims.get("clearance"), approved["clearance"], approved["scope"])
-    ):
-        refuse("EXCEEDS_SUPERVISOR", "the supervisor's own mandate doesn't cover this", next_action="ask_user")
+    if args.get("decision") == "approve" and (beyond := _beyond_supervisor(claims, approved)):
+        refuse("EXCEEDS_SUPERVISOR", beyond, next_action="ask_user")
     # the minted mandate carries the supervisor's status, so the gateway can withdraw it with the supervisor
     who = {"kind": "agent", "id": claims.get("agent_id"), "mandate_jti": claims["jti"],
            "status": claims["status"]["status_list"]}  # fmt: skip

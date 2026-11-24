@@ -231,6 +231,8 @@ async def _request(claims: dict, body: dict, decision_id: str) -> Outcome:
                 validate_entry(entry)
         except Invalid as e:
             return refused("REQUEST_INVALID", str(e))
+        except (TypeError, AttributeError) as e:  # any shape validate_request didn't foresee: refused, not a 500
+            return refused("REQUEST_INVALID", f"malformed scope ({type(e).__name__})")
         if already_granted(claims, scope, args.get("clearance")):
             return Outcome(data={"status": "already_granted", "next_action": "retry"})
     try:

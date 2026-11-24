@@ -34,6 +34,8 @@ CLOCK_SKEW = 30
 # Most rows one call may ask for (the MCP server's own default).
 # shortcut: per call only, many small calls still add up (question 11); add a per-mandate budget for that
 MAX_ROWS = 100
+REQUEST_WINDOW = 300  # seconds a request's ts may be off the gateway's clock, either way
+MAX_NONCE = 256
 # scope-constrained arguments the audit trail may record by value: they say whose data a call concerned
 AUDITED_SCOPE_KEYS = ("urn", "pupil_id")
 
@@ -193,6 +195,11 @@ def verify_mandate(token: str, registry, status_lists: dict[str, str]) -> dict:
 # ---------------------------------------------------------------- scope
 
 
+def denied_by(name: str, deny: list[str]) -> str | None:
+    """The first deny pattern that matches tool `name` ("server.tool"), else None."""
+    return next((pat for pat in deny if fnmatch.fnmatch(name, pat)), None)
+
+
 def check_request(
     req: Request,
     scope: list[dict],
@@ -204,9 +211,8 @@ def check_request(
     """(decision, reason_code, detail). When the call is allowed or held, the accepting scope entry is appended
     to `matched`, so the tool grant can be derived from exactly what allowed it."""
     name = f"{req.server}.{req.tool}"
-    for pat in deny:
-        if fnmatch.fnmatch(name, pat):
-            return "DENY", "DENIED_BY_RULE", pat
+    if pat := denied_by(name, deny):
+        return "DENY", "DENIED_BY_RULE", pat
     # clearance before scope, so no shape of scope entries can route around it
     if refused := check_clearance(req.server, claims, req.tool):
         return refused
@@ -303,8 +309,22 @@ class Gateway:
         self.registry = registry
         self.status_lists = status_lists
         self.step_up = step_up_patterns or ["*.write", "*.draft", "special.*"]
-        self._seen_nonces: set[str] = set()
+        self._seen_nonces: dict[str, float] = {}  # nonce -> when its request's ts leaves the window
+        self._nonces_since_sweep = 0
         self.preapproval_uses = PreapprovalUses(os.environ.get("GATEWAY_STATE_DB"))
+
+    def _remember_nonce(self, req: Request) -> None:
+        # kept until its request's ts is out of the window, so it can never be replayed and never piles up
+        self._seen_nonces[req.nonce] = req.ts + REQUEST_WINDOW
+        self._nonces_since_sweep += 1
+        self._forget_old_nonces()
+
+    def _forget_old_nonces(self, *, force: bool = False) -> None:
+        if not force and self._nonces_since_sweep < 1000:  # noqa: PLR2004
+            return
+        now = time.time()
+        self._seen_nonces = {n: until for n, until in self._seen_nonces.items() if until >= now}
+        self._nonces_since_sweep = 0
 
     def _preapproved(self, req: Request, claims: dict) -> str | None:
         """The action hash when this held call is pre-approved by the mandate and not yet used, else None.
@@ -334,13 +354,15 @@ class Gateway:
         try:
             claims = verify_mandate(req.mandate, self.registry, self.status_lists)
             jwk = claims["cnf"]["jwk"]
-            if abs(req.ts - time.time()) > 300:
+            if abs(req.ts - time.time()) > REQUEST_WINDOW:
                 raise Reject("POP_FAILED", "request timestamp outside window")
+            if not isinstance(req.nonce, str) or not 1 <= len(req.nonce) <= MAX_NONCE:
+                raise Reject("POP_FAILED", f"nonce must be 1 to {MAX_NONCE} characters")
             if req.nonce in self._seen_nonces:
                 raise Reject("POP_FAILED", "replayed nonce")
             if not verify_bytes(jwk_to_pub(jwk), req.signing_input(), req.sig):
                 raise Reject("POP_FAILED", f"bad signature for jkt {jwk_thumbprint(jwk)}")
-            self._seen_nonces.add(req.nonce)
+            self._remember_nonce(req)
             ctx.identity_verified, ctx.claims = True, claims
             ctx.kid = jwt.get_unverified_header(req.mandate).get("kid")  # header was checked with the signature
 
@@ -352,6 +374,9 @@ class Gateway:
             ctx.entry = matched[0] if matched else None
             if decision == "STEP_UP" and (ah := self._preapproved(req, claims)):
                 decision, code, detail = "ALLOW", "PREAPPROVED", ah
+            elif decision == "ALLOW" and "preapproved" in claims and req.server != GRANTS_SERVER:
+                # a mandate minted to release held calls runs those calls and nothing else its scope might cover
+                decision, code, detail = "DENY", "OUT_OF_SCOPE", "this mandate only releases the calls it was approved for"
             return Decision(decision, code, agent_id=claims["agent_id"], detail=detail, **base), ctx
         except Reject as r:
             result = Decision("DENY", r.code, agent_id=None, detail=r.detail, **base)

@@ -269,10 +269,14 @@ def source_over_ceiling(st: State, source: str) -> bool:
     return bool(limit) and st.unverified.count(source) >= limit
 
 
-def plan_for(st: State, claims: dict, server: str, tool: str, arguments: dict) -> Plan:
-    """Raises BudgetInvalid for a malformed budget or rate claim."""
+def plan_for(st: State, claims: dict, server: str, tool: str, arguments: dict, allowed_by: dict | None = None) -> Plan:
+    """Raises BudgetInvalid for a malformed budget or rate claim. `allowed_by`: the scope entry the verifier
+    accepted the call under, so the rate counted is that entry's."""
     claimed = parse_claims(claims)
-    entry = matched_entry(server, tool, arguments, claims.get("scope", []))
+    scope = claims.get("scope", [])
+    entry = next((i for i, e in enumerate(scope) if e is allowed_by), None) if allowed_by is not None else None
+    if entry is None:
+        entry = matched_entry(server, tool, arguments, scope)
     return Plan(family_of(claims), entry, claimed, claims.get("agent_id"))
 
 

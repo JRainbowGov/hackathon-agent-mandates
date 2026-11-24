@@ -32,7 +32,7 @@ def grant_fields(claims: dict, entry: dict, server: str, tool: str | None = None
     pupils = audience_pupils(entry)
     max_rows = entry.get("max_rows", DEFAULT_MAX_ROWS)
     if type(max_rows) is not int or max_rows < 0:
-        max_rows = DEFAULT_MAX_ROWS
+        max_rows = 0  # an unreadable cap is no rows, never the default
     return {
         "level": level,
         "urns": [str(u) for u in urns] if urns is not None else None,

@@ -256,7 +256,7 @@ def _decide(gateway: Gateway, limits: budgets.State, body: CallBody, source: str
         limits.unverified.add(source or "unknown")
     else:
         try:
-            plan = budgets.plan_for(limits, ctx.claims, body.server, body.tool, body.arguments)
+            plan = budgets.plan_for(limits, ctx.claims, body.server, body.tool, body.arguments, ctx.entry)
         except budgets.BudgetInvalid as e:
             decision = _deny(decision, "BUDGET_INVALID", str(e))
         if budgets.key_over_ceiling(limits, ctx.claims.get("agent_id")):
