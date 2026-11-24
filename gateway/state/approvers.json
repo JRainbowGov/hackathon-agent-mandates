@@ -1,0 +1,7 @@
+{
+  "officer:jsmith": {
+    "kty": "OKP",
+    "crv": "Ed25519",
+    "x": "14aG_Tn2OUMeHbENAGSIIb3O4pRiLsQnt6wMbfNfAxA"
+  }
+}
