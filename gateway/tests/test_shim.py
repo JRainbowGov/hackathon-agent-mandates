@@ -163,22 +163,27 @@ def test_reused_approval_is_kept_and_never_shown(flow):
     assert fresh.call("directory", "roster", SCH02_Y11)["status"] == 200
 
 
-def test_several_held_calls_in_one_request(flow):
-    # batch release (add-batch-release, on main): held may be a list; the shim passes it through as is
-    # (this branch's gateway predates batch release, so the request stops at the shim's post)
+def test_several_held_calls_released_by_one_approval(flow):
+    # batch release (add-batch-release): two held drafts, one request, one approval, each released once
     f = flow
-    sent = []
+    scope = [{"server": "pupil-data", "tools": ["draft"], "constraints": {"urn": ["SCH04"]}}]
+    shim = shim_for(f, f["mandate"](scope, deny=[], clearance=2))
+    drafts = [{"urn": "SCH04", "pupil_ids": ["P0011"]}, {"urn": "SCH04", "pupil_ids": ["P0012"]}]
+    held = []
+    for args in drafts:
+        out = shim.call("pupil-data", "draft", args)
+        assert (out["status"], out["decision"]["reason_code"]) == (202, "SENSITIVE_TOOL")
+        held.append(out["held"])
 
-    def recording_post(body):
-        sent.append(body)
-        return 200, {"result": {"status": "pending", "request_id": "sr_batch01"}}
+    asked = shim.request_scopes(held=held, reason="absence letters for both")
+    assert asked["status"] == "pending"
+    approve(f, asked)
+    assert shim.await_approval(asked["request_id"], timeout_s=5)["status"] == "approved"
 
-    shim = shim_for(f, f["mandate"](roster("SCH04"), clearance=2), post=recording_post)
-    two = [{"decision_id": "d1", "server": "pupil-data", "tool": "draft", "arguments": {"urn": "SCH04"}},
-           {"decision_id": "d2", "server": "pupil-data", "tool": "draft", "arguments": {"urn": "SCH04"}}]  # fmt: skip
-    shim.request_scopes(held=two, reason="letters for both")
-    assert sent[-1]["arguments"]["held"] == two
-    assert "scope" not in sent[-1]["arguments"]
+    for args in drafts:
+        released = shim.call("pupil-data", "draft", args)
+        assert (released["status"], released["decision"]["reason_code"]) == (200, "PREAPPROVED")
+    assert shim.call("pupil-data", "draft", drafts[0])["status"] == 202  # once each
 
 
 def test_mcp_request_scopes_accepts_a_list_of_held_calls(flow):
